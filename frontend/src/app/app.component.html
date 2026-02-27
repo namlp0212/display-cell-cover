@@ -1,0 +1,9 @@
+<div class="app-layout">
+  <app-sidebar
+    [coverages]="coverages"
+    (visibilityToggled)="onVisibilityToggled()"
+  ></app-sidebar>
+  <app-map
+    (coveragesChanged)="onCoveragesChanged($event)"
+  ></app-map>
+</div>

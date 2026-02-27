@@ -1,0 +1,53 @@
+.sidebar {
+  height: 100%;
+  padding: 16px;
+  overflow-y: auto;
+  background: #f8f9fa;
+  border-right: 1px solid #dee2e6;
+
+  h2 {
+    margin: 0 0 16px;
+    font-size: 18px;
+    color: #333;
+  }
+}
+
+.empty-message {
+  color: #888;
+  font-style: italic;
+}
+
+.coverage-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.coverage-item {
+  padding: 8px 0;
+  border-bottom: 1px solid #eee;
+}
+
+.coverage-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+
+  input[type="checkbox"] {
+    cursor: pointer;
+  }
+}
+
+.cell-id {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.file-path {
+  display: block;
+  font-size: 12px;
+  color: #666;
+  margin-top: 2px;
+  word-break: break-all;
+}

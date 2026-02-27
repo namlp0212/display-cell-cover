@@ -1,0 +1,14 @@
+ulxmap 605525.000000
+ulymap 2329835.000000
+xdim 10.000000
+ydim 10.000000
+ncols 661
+nrows 561
+nbits 32
+nbands 1
+byteorder I
+layout bil
+bandrowbytes 2644
+totalrowbytes 2644
+skipbytes 0
+datatype R32

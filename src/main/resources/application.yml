@@ -1,0 +1,18 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:cellcover}
+    username: ${DB_USER:cellcover}
+    password: ${DB_PASSWORD:cellcover}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.spatial.dialect.postgis.PostgisPG10Dialect
+  flyway:
+    enabled: true
+
+server:
+  port: ${SERVER_PORT:8080}

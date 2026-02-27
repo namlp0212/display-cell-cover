@@ -1,0 +1,24 @@
+<div class="sidebar">
+  <h2>Coverage Layers</h2>
+
+  @if (coverages.length === 0) {
+    <p class="empty-message">No coverages in current view.</p>
+  }
+
+  <ul class="coverage-list">
+    @for (coverage of coverages; track coverage.id) {
+      <li class="coverage-item">
+        <label class="coverage-label">
+          <input
+            type="checkbox"
+            [checked]="coverage.visible"
+            [disabled]="isToggling(coverage.cellId)"
+            (change)="onToggle(coverage)"
+          />
+          <span class="cell-id">{{ coverage.cellId }}</span>
+        </label>
+        <span class="file-path">{{ coverage.filePath }}</span>
+      </li>
+    }
+  </ul>
+</div>
