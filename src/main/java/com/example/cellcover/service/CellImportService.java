@@ -46,7 +46,7 @@ public class CellImportService {
         Path rasterDir = Paths.get(properties.getRasterDir());
         if (!Files.isDirectory(rasterDir)) {
             log.error("Raster directory not found: {}", rasterDir);
-            return new CellImportResult(List.of(), List.of(), 0, "Error: raster directory not found");
+            return new CellImportResult(List.of(), List.of(), List.of(), 0, 0, "Error: raster directory not found");
         }
 
         // Find all cell folders
@@ -57,12 +57,26 @@ public class CellImportService {
             }
         } catch (IOException e) {
             log.error("Failed to scan raster directory", e);
-            return new CellImportResult(List.of(), List.of(), 0, "Error scanning directory: " + e.getMessage());
+            return new CellImportResult(List.of(), List.of(), List.of(), 0, 0, "Error scanning directory: " + e.getMessage());
         }
+
+        Set<String> localCellIds = new HashSet<>(allCellIds);
 
         // Get existing cell IDs from DB
         Set<String> existingCellIds = new HashSet<>(repository.findDistinctCellIds());
 
+        // --- Cleanup: delete orphan cells (in DB but not on disk) ---
+        List<String> deletedCells = new ArrayList<>();
+        List<String> orphanIds = existingCellIds.stream()
+                .filter(id -> !localCellIds.contains(id))
+                .toList();
+        if (!orphanIds.isEmpty()) {
+            repository.deleteByCellIds(orphanIds);
+            deletedCells.addAll(orphanIds);
+            log.info("Deleted {} orphan cell(s) from DB: {}", orphanIds.size(), orphanIds);
+        }
+
+        // --- Import: add new cells (on disk but not in DB) ---
         List<String> importedCells = new ArrayList<>();
         List<String> skippedCells = new ArrayList<>();
 
@@ -97,13 +111,14 @@ public class CellImportService {
             }
         }
 
-        // Run GeoServer init script if we imported any cells
+        // Run GeoServer init script if anything changed
         String geoServerOutput = "";
-        if (!importedCells.isEmpty()) {
+        if (!importedCells.isEmpty() || !deletedCells.isEmpty()) {
             geoServerOutput = runGeoServerInit();
         }
 
-        return new CellImportResult(importedCells, skippedCells, importedCells.size(), geoServerOutput);
+        return new CellImportResult(importedCells, skippedCells, deletedCells,
+                importedCells.size(), deletedCells.size(), geoServerOutput);
     }
 
     Map<String, Double> parseHdr(Path hdrFile) throws IOException {

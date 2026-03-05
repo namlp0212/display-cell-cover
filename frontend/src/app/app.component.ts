@@ -17,27 +17,29 @@ export class AppComponent {
 
   onCoveragesChanged(coverages: RasterCoverage[]): void {
     if (this.coverages.length === 0) {
-      this.coverages = coverages;
+      this.coverages = [...coverages].sort((a, b) =>
+        a.cellId.localeCompare(b.cellId, undefined, { numeric: true, sensitivity: 'base' })
+      );
       return;
     }
 
-    // Merge new data while preserving existing order
+    // Merge new data while preserving visibility state
     const newMap = new Map(coverages.map(c => [c.id, c]));
     const oldIds = new Set(this.coverages.map(c => c.id));
 
-    // Update existing items in place, keep order
     const merged = this.coverages
       .filter(c => newMap.has(c.id))
       .map(c => newMap.get(c.id)!);
 
-    // Append any new coverages that weren't in the old list
     for (const c of coverages) {
       if (!oldIds.has(c.id)) {
         merged.push(c);
       }
     }
 
-    this.coverages = merged;
+    this.coverages = merged.sort((a, b) =>
+      a.cellId.localeCompare(b.cellId, undefined, { numeric: true, sensitivity: 'base' })
+    );
   }
 
   onVisibilityToggled(): void {

@@ -38,15 +38,16 @@ export class MapComponent implements OnInit, OnDestroy {
   }
 
   refreshMap(): void {
-    // Reload hidden cells (catches cells hidden outside current viewport)
+    // Fetch authoritative hidden list from DB first, THEN trigger viewport refresh.
+    // This prevents a race where updateLayers() runs with stale hiddenCellIds and
+    // produces a different filter string → double WMS recreation → map flicker.
     this.layerService.getHiddenCellIds().subscribe({
       next: (ids) => {
         this.hiddenCellIds = ids;
         this.updateWmsLayers();
+        this.moveEnd$.next(this.map.getBounds());
       }
     });
-    const bounds = this.map.getBounds();
-    this.moveEnd$.next(bounds);
   }
 
   private initMap(): void {
@@ -150,14 +151,18 @@ export class MapComponent implements OnInit, OnDestroy {
   }
 
   private updateWmsLayers(): void {
-    // Build hidden-cell filter fragment
+    // Build hidden-cell filter fragment.
+    // Sort IDs so the filter string is always deterministic (prevents false cache-miss
+    // when hiddenCellIds comes from DB vs from updateLayers() in different insertion order).
     let hiddenFilter = '';
     if (this.hiddenCellIds.length > 0) {
-      const escaped = this.hiddenCellIds.map(id => `'${id}'`).join(',');
+      const escaped = [...this.hiddenCellIds].sort().map(id => `'${id}'`).join(',');
       hiddenFilter = ` AND cell_id NOT IN (${escaped})`;
     }
 
-    // Skip update if filter hasn't changed
+    // Skip update if filter hasn't changed.
+    // hiddenCellIds must be sorted so the string is deterministic regardless
+    // of whether it came from getHiddenCellIds() (DB order) or updateLayers() (computed order).
     const filterKey = hiddenFilter;
     if (filterKey === this.currentCqlFilter) return;
     this.currentCqlFilter = filterKey;

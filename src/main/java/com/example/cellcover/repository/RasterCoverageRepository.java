@@ -24,6 +24,10 @@ public interface RasterCoverageRepository extends JpaRepository<RasterCoverage, 
     List<String> findHiddenCellIds();
 
     @Modifying
+    @Query("DELETE FROM RasterCoverage r WHERE r.cellId IN :cellIds")
+    int deleteByCellIds(@Param("cellIds") List<String> cellIds);
+
+    @Modifying
     @Query("UPDATE RasterCoverage r SET r.visible = :visible WHERE r.cellId = :cellId")
     int toggleVisibility(@Param("cellId") String cellId, @Param("visible") boolean visible);
 }
