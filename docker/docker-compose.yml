@@ -17,5 +17,16 @@ services:
       timeout: 5s
       retries: 5
 
+  pg-tileserv:
+    image: ghcr.io/crunchydata/pg_tileserv:latest
+    container_name: cellcover-tileserv
+    environment:
+      DATABASE_URL: postgresql://cellcover:cellcover@postgis:5432/cellcover
+    ports:
+      - "7800:7800"
+    depends_on:
+      postgis:
+        condition: service_healthy
+
 volumes:
   pgdata:

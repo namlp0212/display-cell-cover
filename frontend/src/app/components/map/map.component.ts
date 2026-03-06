@@ -1,5 +1,9 @@
 import { Component, OnInit, OnDestroy, Output, EventEmitter } from '@angular/core';
-import * as L from 'leaflet';
+import maplibregl, {
+  FilterSpecification,
+  RasterTileSource,
+  VectorTileSource
+} from 'maplibre-gl';
 import { Subject, Subscription } from 'rxjs';
 import { debounceTime, switchMap } from 'rxjs/operators';
 import { LayerService } from '../../services/layer.service';
@@ -15,14 +19,16 @@ import { environment } from '../../../environments/environment';
 export class MapComponent implements OnInit, OnDestroy {
   @Output() coveragesChanged = new EventEmitter<RasterCoverage[]>();
 
+  // Zoom boundaries
+  private static readonly ZOOM_HEX  = 11;  // < 11 : hex heatmap
+  private static readonly ZOOM_WMS  = 13;  // >= 13: WMS raster
+                                            // 11–12: cell bbox vector
   private static readonly OVERLAP_GROUPS = 8;
 
-  private map!: L.Map;
-  private geoJsonLayer!: L.GeoJSON;
-  private wmsLayer: L.TileLayer.WMS | null = null;
-  private currentCqlFilter: string | null = null;
+  private map!: maplibregl.Map;
   private hiddenCellIds: string[] = [];
-  private moveEnd$ = new Subject<L.LatLngBounds>();
+  private currentCqlFilter: string | null = null;
+  private moveEnd$ = new Subject<maplibregl.LngLatBounds>();
   private subscription!: Subscription;
 
   constructor(private layerService: LayerService) {}
@@ -37,57 +43,248 @@ export class MapComponent implements OnInit, OnDestroy {
     this.map?.remove();
   }
 
+  /** Gọi từ AppComponent sau khi toggle visibility */
   refreshMap(): void {
-    // Fetch authoritative hidden list from DB first, THEN trigger viewport refresh.
-    // This prevents a race where updateLayers() runs with stale hiddenCellIds and
-    // produces a different filter string → double WMS recreation → map flicker.
     this.layerService.getHiddenCellIds().subscribe({
       next: (ids) => {
         this.hiddenCellIds = ids;
-        this.updateWmsLayers();
+        this.applyToggleByZoom();
         this.moveEnd$.next(this.map.getBounds());
       }
     });
   }
 
+  // ─── Map init ──────────────────────────────────────────────────────────────
+
   private initMap(): void {
-    this.map = L.map('map', {
-      center: [21.028, 105.854],
-      zoom: 12
+    this.map = new maplibregl.Map({
+      container: 'map',
+      style: {
+        version: 8,
+        glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+        sources: {
+          'google': {
+            type: 'raster',
+            tiles: ['https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}'],
+            tileSize: 256,
+            attribution: '© Google Maps'
+          }
+        },
+        layers: [
+          { id: 'google-tiles', type: 'raster', source: 'google' }
+        ]
+      },
+      center: [105.854, 21.028],
+      zoom: 12,
+      maxZoom: 20
     });
 
-    L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
-      maxZoom: 20,
-      attribution: '&copy; Google'
-    }).addTo(this.map);
+    this.map.addControl(new maplibregl.NavigationControl(), 'top-right');
+    this.map.addControl(new maplibregl.ScaleControl(), 'bottom-left');
 
-    // Create isolated pane for WMS layers so blend mode only applies among them
-    this.map.createPane('wmsPane');
-    this.map.getPane('wmsPane')!.style.zIndex = '450';
-
-    this.geoJsonLayer = L.geoJSON(undefined, {
-      style: () => ({
-        color: '#3388ff',
-        weight: 0,
-        fillOpacity: 0
-      }),
-      onEachFeature: (feature, layer) => {
-        if (feature.properties) {
-          const props = feature.properties;
-          layer.bindPopup(`
-            <strong>Cell ID:</strong> ${props['cellId']}<br>
-            <strong>File:</strong> ${props['filePath']}<br>
-            <strong>CRS:</strong> ${props['crs']}<br>
-            <strong>SVR:</strong> ${props['svr'] ? 'Yes' : 'No'}
-          `);
-        }
-      }
-    }).addTo(this.map);
+    this.map.on('load', () => {
+      this.addSources();
+      this.addLayers();
+      this.setupPopup();
+      this.setupZoomBadge();
+    });
 
     this.map.on('moveend', () => {
       this.moveEnd$.next(this.map.getBounds());
     });
   }
+
+  // ─── Sources ───────────────────────────────────────────────────────────────
+
+  private addSources(): void {
+    // Vector: hex heatmap (zoom 0–10)
+    this.map.addSource('hex-coverage', {
+      type: 'vector',
+      tiles: [`${environment.pgTileservUrl}/functions/hex_density_tile/{z}/{x}/{y}.pbf`],
+      minzoom: 0,
+      maxzoom: 10
+    });
+
+    // Vector: cell bbox (zoom 11–12)
+    this.map.addSource('cell-bbox', {
+      type: 'vector',
+      tiles: [`${environment.pgTileservUrl}/public.raster_coverages/{z}/{x}/{y}.pbf`],
+      minzoom: 10,
+      maxzoom: 14
+    });
+
+    // Raster: WMS GeoServer (zoom 13+)
+    this.map.addSource('wms-binary', {
+      type: 'raster',
+      tiles: [this.buildWmsUrl('')],
+      tileSize: 512
+    });
+  }
+
+  // ─── Layers ────────────────────────────────────────────────────────────────
+
+  private addLayers(): void {
+    const Z_HEX = MapComponent.ZOOM_HEX;
+    const Z_WMS = MapComponent.ZOOM_WMS;
+
+    // ── Zoom 0–10: Hex heatmap ──────────────────────────────────────────────
+    this.map.addLayer({
+      id: 'hex-fill',
+      type: 'fill',
+      source: 'hex-coverage',
+      'source-layer': 'hex_coverage',
+      maxzoom: Z_HEX,
+      paint: {
+        'fill-color': [
+          'interpolate', ['linear'], ['get', 'count'],
+          0,  'rgba(0,0,0,0)',
+          1,  '#ffffb2',
+          5,  '#fecc5c',
+          10, '#fd8d3c',
+          20, '#f03b20',
+          50, '#bd0026'
+        ],
+        'fill-opacity': 0.75
+      }
+    });
+
+    this.map.addLayer({
+      id: 'hex-outline',
+      type: 'line',
+      source: 'hex-coverage',
+      'source-layer': 'hex_coverage',
+      maxzoom: Z_HEX,
+      paint: {
+        'line-color': 'rgba(0,0,0,0.1)',
+        'line-width': 0.5
+      }
+    });
+
+    // ── Zoom 11–12: Cell bbox ────────────────────────────────────────────────
+    this.map.addLayer({
+      id: 'cell-fill',
+      type: 'fill',
+      source: 'cell-bbox',
+      'source-layer': 'raster_coverages',
+      minzoom: Z_HEX,
+      maxzoom: Z_WMS,
+      paint: {
+        'fill-color': 'rgba(0, 100, 255, 0.2)',
+        'fill-outline-color': 'rgba(0, 100, 255, 0.8)'
+      }
+    });
+
+    this.map.addLayer({
+      id: 'cell-outline',
+      type: 'line',
+      source: 'cell-bbox',
+      'source-layer': 'raster_coverages',
+      minzoom: Z_HEX,
+      maxzoom: Z_WMS,
+      paint: {
+        'line-color': '#0064ff',
+        'line-width': 1
+      }
+    });
+
+    this.map.addLayer({
+      id: 'cell-label',
+      type: 'symbol',
+      source: 'cell-bbox',
+      'source-layer': 'raster_coverages',
+      minzoom: Z_HEX,
+      maxzoom: Z_WMS,
+      layout: {
+        'text-field': ['get', 'cell_id'],
+        'text-size': 10,
+        'text-allow-overlap': false,
+        'text-ignore-placement': false
+      },
+      paint: {
+        'text-color': '#003399',
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 1.5
+      }
+    });
+
+    // ── Zoom 13+: WMS raster ─────────────────────────────────────────────────
+    this.map.addLayer({
+      id: 'wms-raster',
+      type: 'raster',
+      source: 'wms-binary',
+      minzoom: Z_WMS,
+      paint: {
+        'raster-opacity': 0.85,
+        'raster-fade-duration': 200
+      }
+    });
+  }
+
+  // ─── Popup & cursor ────────────────────────────────────────────────────────
+
+  private setupPopup(): void {
+    const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '300px' });
+
+    this.map.on('click', 'cell-fill', (e) => {
+      if (!e.features?.length) return;
+      const p = e.features[0].properties;
+      popup
+        .setLngLat(e.lngLat)
+        .setHTML(`
+          <strong>Cell ID:</strong> ${p['cell_id']}<br>
+          <strong>File:</strong> ${p['file_path']}<br>
+          <strong>CRS:</strong> ${p['crs']}<br>
+          <strong>SVR:</strong> ${p['svr'] ? 'Yes' : 'No'}
+        `)
+        .addTo(this.map);
+    });
+
+    this.map.on('click', 'hex-fill', (e) => {
+      if (!e.features?.length) return;
+      const p = e.features[0].properties;
+      popup
+        .setLngLat(e.lngLat)
+        .setHTML(`
+          <strong>Coverage density</strong><br>
+          Visible cells: <b>${p['count']}</b><br>
+          Total cells: <b>${p['total']}</b>
+        `)
+        .addTo(this.map);
+    });
+
+    ['cell-fill', 'hex-fill'].forEach(layer => {
+      this.map.on('mouseenter', layer, () => {
+        this.map.getCanvas().style.cursor = 'pointer';
+      });
+      this.map.on('mouseleave', layer, () => {
+        this.map.getCanvas().style.cursor = '';
+      });
+    });
+  }
+
+  // ─── Zoom badge (debug/UX) ─────────────────────────────────────────────────
+
+  private setupZoomBadge(): void {
+    this.map.on('zoom', () => {
+      const z = this.map.getZoom();
+      const badge = document.getElementById('zoom-badge');
+      if (!badge) return;
+      const Z_HEX = MapComponent.ZOOM_HEX;
+      const Z_WMS = MapComponent.ZOOM_WMS;
+      if (z < Z_HEX) {
+        badge.textContent = `Z${z.toFixed(1)} — Hex heatmap`;
+        badge.className = 'zoom-badge hex';
+      } else if (z < Z_WMS) {
+        badge.textContent = `Z${z.toFixed(1)} — Cell bbox`;
+        badge.className = 'zoom-badge bbox';
+      } else {
+        badge.textContent = `Z${z.toFixed(1)} — WMS raster`;
+        badge.className = 'zoom-badge wms';
+      }
+    });
+  }
+
+  // ─── Move end → fetch coverages ───────────────────────────────────────────
 
   private initMoveEndSubscription(): void {
     this.subscription = this.moveEnd$.pipe(
@@ -99,113 +296,87 @@ export class MapComponent implements OnInit, OnDestroy {
       })
     ).subscribe({
       next: (coverages) => {
-        this.updateLayers(coverages);
+        this.updateHiddenList(coverages);
         this.coveragesChanged.emit(coverages);
       },
       error: (err) => console.error('Error fetching layers:', err)
     });
 
-    // Trigger initial load
     setTimeout(() => this.refreshMap(), 100);
   }
 
-  private updateLayers(coverages: RasterCoverage[]): void {
-    this.updateGeoJsonLayer(coverages);
-
-    // Cells in viewport that are hidden
+  private updateHiddenList(coverages: RasterCoverage[]): void {
     const inViewportIds = new Set(coverages.map(c => c.cellId));
-    const inViewportHidden = coverages
-      .filter(c => !c.visible)
-      .map(c => c.cellId);
-
-    // Preserve cells hidden outside the current viewport
-    const outOfViewportHidden = this.hiddenCellIds
-      .filter(id => !inViewportIds.has(id));
-
+    const inViewportHidden = coverages.filter(c => !c.visible).map(c => c.cellId);
+    const outOfViewportHidden = this.hiddenCellIds.filter(id => !inViewportIds.has(id));
     this.hiddenCellIds = [...new Set([...inViewportHidden, ...outOfViewportHidden])];
-    this.updateWmsLayers();
+    this.applyToggleByZoom();
   }
 
-  private updateGeoJsonLayer(coverages: RasterCoverage[]): void {
-    this.geoJsonLayer.clearLayers();
+  // ─── Toggle logic theo zoom ────────────────────────────────────────────────
 
-    const features = coverages.map(c => ({
-      type: 'Feature' as const,
-      geometry: c.bbox,
-      properties: {
-        id: c.id,
-        cellId: c.cellId,
-        filePath: c.filePath,
-        crs: c.crs,
-        svr: c.svr,
-        visible: c.visible
+  private applyToggleByZoom(): void {
+    if (!this.map.loaded()) return;
+    const z = this.map.getZoom();
+    if (z >= MapComponent.ZOOM_WMS) {
+      this.updateWmsSource();
+    } else if (z >= MapComponent.ZOOM_HEX) {
+      this.applyCellBboxFilter();
+    } else {
+      this.reloadHexTiles();
+    }
+  }
+
+  /** Zoom 0–10: bust tile cache bằng timestamp param */
+  private reloadHexTiles(): void {
+    const src = this.map.getSource('hex-coverage') as VectorTileSource;
+    src?.setTiles([
+      `${environment.pgTileservUrl}/functions/hex_density_tile/{z}/{x}/{y}.pbf?t=${Date.now()}`
+    ]);
+  }
+
+  /** Zoom 11–12: GPU setFilter — không cần request server */
+  private applyCellBboxFilter(): void {
+    const hidden = this.hiddenCellIds;
+    const filter: FilterSpecification = hidden.length > 0
+      ? ['!', ['in', ['get', 'cell_id'], ['literal', hidden]]]
+      : ['boolean', true];
+
+    (['cell-fill', 'cell-outline', 'cell-label'] as const).forEach(id => {
+      if (this.map.getLayer(id)) {
+        this.map.setFilter(id, filter);
       }
-    }));
-
-    const featureCollection: GeoJSON.FeatureCollection = {
-      type: 'FeatureCollection',
-      features
-    };
-
-    this.geoJsonLayer.addData(featureCollection);
+    });
   }
 
-  private updateWmsLayers(): void {
-    // Build hidden-cell filter fragment.
-    // Sort IDs so the filter string is always deterministic (prevents false cache-miss
-    // when hiddenCellIds comes from DB vs from updateLayers() in different insertion order).
-    let hiddenFilter = '';
-    if (this.hiddenCellIds.length > 0) {
-      const escaped = [...this.hiddenCellIds].sort().map(id => `'${id}'`).join(',');
-      hiddenFilter = ` AND cell_id NOT IN (${escaped})`;
-    }
+  /** Zoom 13+: cập nhật WMS URL với CQL_FILTER mới */
+  private updateWmsSource(): void {
+    const hiddenFilter = this.hiddenCellIds.length > 0
+      ? ` AND cell_id NOT IN (${[...this.hiddenCellIds].sort().map(id => `'${id}'`).join(',')})`
+      : '';
 
-    // Skip update if filter hasn't changed.
-    // hiddenCellIds must be sorted so the string is deterministic regardless
-    // of whether it came from getHiddenCellIds() (DB order) or updateLayers() (computed order).
-    const filterKey = hiddenFilter;
-    if (filterKey === this.currentCqlFilter) return;
-    this.currentCqlFilter = filterKey;
+    if (hiddenFilter === this.currentCqlFilter) return;
+    this.currentCqlFilter = hiddenFilter;
 
-    // Remove old layer
-    if (this.wmsLayer) {
-      this.map.removeLayer(this.wmsLayer);
-      this.wmsLayer = null;
-    }
+    const src = this.map.getSource('wms-binary') as RasterTileSource;
+    src?.setTiles([this.buildWmsUrl(hiddenFilter)]);
+  }
 
-    // One WMS request with the layer repeated per overlap group.
-    // GeoServer composites sub-layers server-side (source-over alpha),
-    // so overlapping areas get progressively more opaque.
+  private buildWmsUrl(hiddenFilter: string): string {
     const n = MapComponent.OVERLAP_GROUPS;
     const layers = Array(n).fill('cellcover:binary').join(',');
     const styles = Array(n).fill('cellcover-binary').join(',');
-    const cqlParts = Array.from({ length: n }, (_, g) => `ovlp_group=${g}${hiddenFilter}`);
-    const cqlFilter = cqlParts.join(';');
+    const cqlFilter = Array.from({ length: n }, (_, g) =>
+      `ovlp_group=${g}${hiddenFilter}`
+    ).join(';');
 
-    this.wmsLayer = L.tileLayer.wms(`${environment.geoServerUrl}/wms`, {
-      layers,
-      styles,
-      format: 'image/png',
-      transparent: true,
-      version: '1.1.1',
-      pane: 'wmsPane',
-      tiled: true,
-      tileSize: 512,
-      keepBuffer: 4,
-      CQL_FILTER: cqlFilter
-    } as any);
-
-    // Retry failed tiles
-    this.wmsLayer.on('tileerror', (event: any) => {
-      const tile = event.tile;
-      const src = tile.src;
-      if (!tile._retryCount) tile._retryCount = 0;
-      if (tile._retryCount < 3) {
-        tile._retryCount++;
-        setTimeout(() => { tile.src = src; }, 1000 * tile._retryCount);
-      }
-    });
-
-    this.wmsLayer.addTo(this.map);
+    return `${environment.geoServerUrl}/wms?` +
+      `SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap` +
+      `&LAYERS=${encodeURIComponent(layers)}` +
+      `&STYLES=${encodeURIComponent(styles)}` +
+      `&FORMAT=image%2Fpng&TRANSPARENT=true` +
+      `&CQL_FILTER=${encodeURIComponent(cqlFilter)}` +
+      `&WIDTH=512&HEIGHT=512` +
+      `&BBOX={bbox-epsg-3857}&SRS=EPSG%3A3857`;
   }
 }

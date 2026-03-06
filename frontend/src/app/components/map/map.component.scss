@@ -1,5 +1,23 @@
 #map {
   width: 100%;
   height: 100%;
+  position: relative;
 }
 
+.zoom-badge {
+  position: absolute;
+  bottom: 40px;
+  right: 10px;
+  z-index: 10;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  pointer-events: none;
+  transition: background-color 0.3s;
+
+  &.hex  { background: #bd0026; }
+  &.bbox { background: #0064ff; }
+  &.wms  { background: #2a7a2a; }
+}
