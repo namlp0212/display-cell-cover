@@ -36,7 +36,7 @@ RETURNS bytea LANGUAGE sql STABLE PARALLEL SAFE AS $$
                 4096, 64, true
             ) AS geom
         FROM hex_coverage
-        WHERE res = CASE WHEN z <= 7 THEN 7 ELSE 9 END
+        WHERE res = CASE WHEN z <= 9 THEN 7 ELSE 9 END
           AND h3_geom && ST_Transform(ST_TileEnvelope(z, x, y), 4326)
           AND count > 0
     ) q

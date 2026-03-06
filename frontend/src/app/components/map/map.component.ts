@@ -100,7 +100,7 @@ export class MapComponent implements OnInit, OnDestroy {
     // Vector: hex heatmap (zoom 0–10)
     this.map.addSource('hex-coverage', {
       type: 'vector',
-      tiles: [`${environment.pgTileservUrl}/functions/hex_density_tile/{z}/{x}/{y}.pbf`],
+      tiles: [`${environment.pgTileservUrl}/public.hex_density_tile/{z}/{x}/{y}.pbf`],
       minzoom: 0,
       maxzoom: 10
     });
@@ -331,7 +331,7 @@ export class MapComponent implements OnInit, OnDestroy {
   private reloadHexTiles(): void {
     const src = this.map.getSource('hex-coverage') as VectorTileSource;
     src?.setTiles([
-      `${environment.pgTileservUrl}/functions/hex_density_tile/{z}/{x}/{y}.pbf?t=${Date.now()}`
+      `${environment.pgTileservUrl}/public.hex_density_tile/{z}/{x}/{y}.pbf?t=${Date.now()}`
     ]);
   }
 
