@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: cellcover
       POSTGRES_PASSWORD: cellcover
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-db:/docker-entrypoint-initdb.d
@@ -18,7 +18,7 @@ services:
       retries: 5
 
   pg-tileserv:
-    image: ghcr.io/crunchydata/pg_tileserv:latest
+    image: pramsey/pg_tileserv:latest
     container_name: cellcover-tileserv
     environment:
       DATABASE_URL: postgresql://cellcover:cellcover@postgis:5432/cellcover

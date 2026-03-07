@@ -16,3 +16,7 @@ spring:
 
 server:
   port: ${SERVER_PORT:8080}
+
+geoserver:
+  url: ${GEOSERVER_URL:http://localhost:8081/geoserver}
+  overlap-groups: 8

@@ -1,9 +1,7 @@
 import { Component, OnInit, OnDestroy, Output, EventEmitter } from '@angular/core';
-import maplibregl, {
-  FilterSpecification,
-  RasterTileSource,
-  VectorTileSource
-} from 'maplibre-gl';
+import * as L from 'leaflet';
+import '@maplibre/maplibre-gl-leaflet';
+import { RasterTileSource, VectorTileSource } from 'maplibre-gl';
 import { Subject, Subscription } from 'rxjs';
 import { debounceTime, switchMap } from 'rxjs/operators';
 import { LayerService } from '../../services/layer.service';
@@ -20,15 +18,13 @@ export class MapComponent implements OnInit, OnDestroy {
   @Output() coveragesChanged = new EventEmitter<RasterCoverage[]>();
 
   // Zoom boundaries
-  private static readonly ZOOM_HEX  = 11;  // < 11 : hex heatmap
-  private static readonly ZOOM_WMS  = 13;  // >= 13: WMS raster
-                                            // 11–12: cell bbox vector
-  private static readonly OVERLAP_GROUPS = 8;
+  private static readonly ZOOM_WMS = 12;  // < 12: hex heatmap  |  >= 12: WMS raster
 
-  private map!: maplibregl.Map;
+  private map!: L.Map;
+  private glLayer!: L.MaplibreGL;
   private hiddenCellIds: string[] = [];
   private currentCqlFilter: string | null = null;
-  private moveEnd$ = new Subject<maplibregl.LngLatBounds>();
+  private moveEnd$ = new Subject<L.LatLngBounds>();
   private subscription!: Subscription;
 
   constructor(private layerService: LayerService) {}
@@ -57,8 +53,18 @@ export class MapComponent implements OnInit, OnDestroy {
   // ─── Map init ──────────────────────────────────────────────────────────────
 
   private initMap(): void {
-    this.map = new maplibregl.Map({
-      container: 'map',
+    this.map = L.map('map', {
+      center: [21.028, 105.854],
+      zoom: 12,
+      maxZoom: 20,
+      zoomControl: false
+    });
+
+    L.control.zoom({ position: 'topright' }).addTo(this.map);
+    L.control.scale({ position: 'bottomleft' }).addTo(this.map);
+
+    // MapLibre GL layer wrapping the full style (base + overlays)
+    this.glLayer = L.maplibreGL({
       style: {
         version: 8,
         glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
@@ -68,25 +74,60 @@ export class MapComponent implements OnInit, OnDestroy {
             tiles: ['https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}'],
             tileSize: 256,
             attribution: '© Google Maps'
+          },
+          'hex-coverage': {
+            type: 'vector',
+            tiles: [`${environment.pgTileservUrl}/public.hex_density_tile/{z}/{x}/{y}.pbf`],
+            minzoom: 0,
+            maxzoom: 11
+          },
+          'wms-binary': {
+            type: 'raster',
+            tiles: [this.buildWmsUrl('')],
+            tileSize: 256,
+            maxzoom: 13
           }
         },
         layers: [
-          { id: 'google-tiles', type: 'raster', source: 'google' }
+          { id: 'google-tiles', type: 'raster', source: 'google' },
+          {
+            id: 'hex-fill',
+            type: 'fill',
+            source: 'hex-coverage',
+            'source-layer': 'hex_coverage',
+            maxzoom: MapComponent.ZOOM_WMS,
+            paint: {
+              'fill-color': [
+                'interpolate', ['linear'], ['get', 'count'],
+                0,  'rgba(0,0,0,0)',
+                1,  '#d4f1f9',
+                5,  '#7ab7ce',
+                15, '#2C788E',
+                40, '#1e6b80',
+                100,'#155e70'
+              ],
+              'fill-opacity': 0.55,
+              'fill-outline-color': 'rgba(0,0,0,0)'
+            }
+          },
+          {
+            id: 'wms-raster',
+            type: 'raster',
+            source: 'wms-binary',
+            minzoom: MapComponent.ZOOM_WMS,
+            paint: {
+              'raster-opacity': 0.65,
+              'raster-fade-duration': 200
+            }
+          }
         ]
-      },
-      center: [105.854, 21.028],
-      zoom: 12,
-      maxZoom: 20
-    });
+      }
+    }).addTo(this.map);
 
-    this.map.addControl(new maplibregl.NavigationControl(), 'top-right');
-    this.map.addControl(new maplibregl.ScaleControl(), 'bottom-left');
-
-    this.map.on('load', () => {
-      this.addSources();
-      this.addLayers();
+    this.glLayer.getMaplibreMap().on('load', () => {
       this.setupPopup();
       this.setupZoomBadge();
+      this.applyToggleByZoom();
     });
 
     this.map.on('moveend', () => {
@@ -94,171 +135,25 @@ export class MapComponent implements OnInit, OnDestroy {
     });
   }
 
-  // ─── Sources ───────────────────────────────────────────────────────────────
-
-  private addSources(): void {
-    // Vector: hex heatmap (zoom 0–10)
-    this.map.addSource('hex-coverage', {
-      type: 'vector',
-      tiles: [`${environment.pgTileservUrl}/public.hex_density_tile/{z}/{x}/{y}.pbf`],
-      minzoom: 0,
-      maxzoom: 10
-    });
-
-    // Vector: cell bbox (zoom 11–12)
-    this.map.addSource('cell-bbox', {
-      type: 'vector',
-      tiles: [`${environment.pgTileservUrl}/public.raster_coverages/{z}/{x}/{y}.pbf`],
-      minzoom: 10,
-      maxzoom: 14
-    });
-
-    // Raster: WMS GeoServer (zoom 13+)
-    this.map.addSource('wms-binary', {
-      type: 'raster',
-      tiles: [this.buildWmsUrl('')],
-      tileSize: 512
-    });
-  }
-
-  // ─── Layers ────────────────────────────────────────────────────────────────
-
-  private addLayers(): void {
-    const Z_HEX = MapComponent.ZOOM_HEX;
-    const Z_WMS = MapComponent.ZOOM_WMS;
-
-    // ── Zoom 0–10: Hex heatmap ──────────────────────────────────────────────
-    this.map.addLayer({
-      id: 'hex-fill',
-      type: 'fill',
-      source: 'hex-coverage',
-      'source-layer': 'hex_coverage',
-      maxzoom: Z_HEX,
-      paint: {
-        'fill-color': [
-          'interpolate', ['linear'], ['get', 'count'],
-          0,  'rgba(0,0,0,0)',
-          1,  '#ffffb2',
-          5,  '#fecc5c',
-          10, '#fd8d3c',
-          20, '#f03b20',
-          50, '#bd0026'
-        ],
-        'fill-opacity': 0.75
-      }
-    });
-
-    this.map.addLayer({
-      id: 'hex-outline',
-      type: 'line',
-      source: 'hex-coverage',
-      'source-layer': 'hex_coverage',
-      maxzoom: Z_HEX,
-      paint: {
-        'line-color': 'rgba(0,0,0,0.1)',
-        'line-width': 0.5
-      }
-    });
-
-    // ── Zoom 11–12: Cell bbox ────────────────────────────────────────────────
-    this.map.addLayer({
-      id: 'cell-fill',
-      type: 'fill',
-      source: 'cell-bbox',
-      'source-layer': 'raster_coverages',
-      minzoom: Z_HEX,
-      maxzoom: Z_WMS,
-      paint: {
-        'fill-color': 'rgba(0, 100, 255, 0.2)',
-        'fill-outline-color': 'rgba(0, 100, 255, 0.8)'
-      }
-    });
-
-    this.map.addLayer({
-      id: 'cell-outline',
-      type: 'line',
-      source: 'cell-bbox',
-      'source-layer': 'raster_coverages',
-      minzoom: Z_HEX,
-      maxzoom: Z_WMS,
-      paint: {
-        'line-color': '#0064ff',
-        'line-width': 1
-      }
-    });
-
-    this.map.addLayer({
-      id: 'cell-label',
-      type: 'symbol',
-      source: 'cell-bbox',
-      'source-layer': 'raster_coverages',
-      minzoom: Z_HEX,
-      maxzoom: Z_WMS,
-      layout: {
-        'text-field': ['get', 'cell_id'],
-        'text-size': 10,
-        'text-allow-overlap': false,
-        'text-ignore-placement': false
-      },
-      paint: {
-        'text-color': '#003399',
-        'text-halo-color': '#ffffff',
-        'text-halo-width': 1.5
-      }
-    });
-
-    // ── Zoom 13+: WMS raster ─────────────────────────────────────────────────
-    this.map.addLayer({
-      id: 'wms-raster',
-      type: 'raster',
-      source: 'wms-binary',
-      minzoom: Z_WMS,
-      paint: {
-        'raster-opacity': 0.85,
-        'raster-fade-duration': 200
-      }
-    });
-  }
-
-  // ─── Popup & cursor ────────────────────────────────────────────────────────
+  // ─── Popup (Leaflet popup triggered by MapLibre feature query) ─────────────
 
   private setupPopup(): void {
-    const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '300px' });
+    const glMap = this.glLayer.getMaplibreMap();
+    const popup = L.popup({ maxWidth: 300 });
 
-    this.map.on('click', 'cell-fill', (e) => {
-      if (!e.features?.length) return;
-      const p = e.features[0].properties;
+    this.map.on('click', (e: L.LeafletMouseEvent) => {
+      const point = glMap.project([e.latlng.lng, e.latlng.lat]);
+      const features = glMap.queryRenderedFeatures(point, { layers: ['hex-fill'] });
+      if (!features?.length) return;
+      const p = features[0].properties;
       popup
-        .setLngLat(e.lngLat)
-        .setHTML(`
-          <strong>Cell ID:</strong> ${p['cell_id']}<br>
-          <strong>File:</strong> ${p['file_path']}<br>
-          <strong>CRS:</strong> ${p['crs']}<br>
-          <strong>SVR:</strong> ${p['svr'] ? 'Yes' : 'No'}
-        `)
-        .addTo(this.map);
-    });
-
-    this.map.on('click', 'hex-fill', (e) => {
-      if (!e.features?.length) return;
-      const p = e.features[0].properties;
-      popup
-        .setLngLat(e.lngLat)
-        .setHTML(`
+        .setLatLng(e.latlng)
+        .setContent(`
           <strong>Coverage density</strong><br>
-          Visible cells: <b>${p['count']}</b><br>
-          Total cells: <b>${p['total']}</b>
+          Visible cells: <b>${p?.['count']}</b><br>
+          Total cells: <b>${p?.['total']}</b>
         `)
-        .addTo(this.map);
-    });
-
-    ['cell-fill', 'hex-fill'].forEach(layer => {
-      this.map.on('mouseenter', layer, () => {
-        this.map.getCanvas().style.cursor = 'pointer';
-      });
-      this.map.on('mouseleave', layer, () => {
-        this.map.getCanvas().style.cursor = '';
-      });
+        .openOn(this.map);
     });
   }
 
@@ -269,14 +164,9 @@ export class MapComponent implements OnInit, OnDestroy {
       const z = this.map.getZoom();
       const badge = document.getElementById('zoom-badge');
       if (!badge) return;
-      const Z_HEX = MapComponent.ZOOM_HEX;
-      const Z_WMS = MapComponent.ZOOM_WMS;
-      if (z < Z_HEX) {
+      if (z < MapComponent.ZOOM_WMS) {
         badge.textContent = `Z${z.toFixed(1)} — Hex heatmap`;
         badge.className = 'zoom-badge hex';
-      } else if (z < Z_WMS) {
-        badge.textContent = `Z${z.toFixed(1)} — Cell bbox`;
-        badge.className = 'zoom-badge bbox';
       } else {
         badge.textContent = `Z${z.toFixed(1)} — WMS raster`;
         badge.className = 'zoom-badge wms';
@@ -316,67 +206,37 @@ export class MapComponent implements OnInit, OnDestroy {
   // ─── Toggle logic theo zoom ────────────────────────────────────────────────
 
   private applyToggleByZoom(): void {
-    if (!this.map.loaded()) return;
-    const z = this.map.getZoom();
-    if (z >= MapComponent.ZOOM_WMS) {
+    const glMap = this.glLayer?.getMaplibreMap();
+    if (!glMap?.loaded()) return;
+    if (this.map.getZoom() >= MapComponent.ZOOM_WMS) {
       this.updateWmsSource();
-    } else if (z >= MapComponent.ZOOM_HEX) {
-      this.applyCellBboxFilter();
     } else {
       this.reloadHexTiles();
     }
   }
 
-  /** Zoom 0–10: bust tile cache bằng timestamp param */
+  /** Zoom 0–11: bust tile cache để server recompute hex density */
   private reloadHexTiles(): void {
-    const src = this.map.getSource('hex-coverage') as VectorTileSource;
+    const glMap = this.glLayer.getMaplibreMap();
+    const src = glMap.getSource('hex-coverage') as VectorTileSource;
     src?.setTiles([
       `${environment.pgTileservUrl}/public.hex_density_tile/{z}/{x}/{y}.pbf?t=${Date.now()}`
     ]);
   }
 
-  /** Zoom 11–12: GPU setFilter — không cần request server */
-  private applyCellBboxFilter(): void {
-    const hidden = this.hiddenCellIds;
-    const filter: FilterSpecification = hidden.length > 0
-      ? ['!', ['in', ['get', 'cell_id'], ['literal', hidden]]]
-      : ['boolean', true];
-
-    (['cell-fill', 'cell-outline', 'cell-label'] as const).forEach(id => {
-      if (this.map.getLayer(id)) {
-        this.map.setFilter(id, filter);
-      }
-    });
-  }
-
-  /** Zoom 13+: cập nhật WMS URL với CQL_FILTER mới */
+  /** Zoom 12+: cập nhật WMS proxy URL với hidden IDs mới */
   private updateWmsSource(): void {
-    const hiddenFilter = this.hiddenCellIds.length > 0
-      ? ` AND cell_id NOT IN (${[...this.hiddenCellIds].sort().map(id => `'${id}'`).join(',')})`
-      : '';
+    const hiddenKey = [...this.hiddenCellIds].sort().join(',');
+    if (hiddenKey === this.currentCqlFilter) return;
+    this.currentCqlFilter = hiddenKey;
 
-    if (hiddenFilter === this.currentCqlFilter) return;
-    this.currentCqlFilter = hiddenFilter;
-
-    const src = this.map.getSource('wms-binary') as RasterTileSource;
-    src?.setTiles([this.buildWmsUrl(hiddenFilter)]);
+    const glMap = this.glLayer.getMaplibreMap();
+    const src = glMap.getSource('wms-binary') as RasterTileSource;
+    src?.setTiles([this.buildWmsUrl(hiddenKey)]);
   }
 
-  private buildWmsUrl(hiddenFilter: string): string {
-    const n = MapComponent.OVERLAP_GROUPS;
-    const layers = Array(n).fill('cellcover:binary').join(',');
-    const styles = Array(n).fill('cellcover-binary').join(',');
-    const cqlFilter = Array.from({ length: n }, (_, g) =>
-      `ovlp_group=${g}${hiddenFilter}`
-    ).join(';');
-
-    return `${environment.geoServerUrl}/wms?` +
-      `SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap` +
-      `&LAYERS=${encodeURIComponent(layers)}` +
-      `&STYLES=${encodeURIComponent(styles)}` +
-      `&FORMAT=image%2Fpng&TRANSPARENT=true` +
-      `&CQL_FILTER=${encodeURIComponent(cqlFilter)}` +
-      `&WIDTH=512&HEIGHT=512` +
-      `&BBOX={bbox-epsg-3857}&SRS=EPSG%3A3857`;
+  private buildWmsUrl(hiddenIds: string): string {
+    const base = `${environment.apiUrl}/wms-tile?bbox={bbox-epsg-3857}`;
+    return hiddenIds ? `${base}&hidden=${encodeURIComponent(hiddenIds)}` : base;
   }
 }
