@@ -39,7 +39,7 @@ export class MapComponent implements OnInit, OnDestroy {
     this.map?.remove();
   }
 
-  /** Gọi từ AppComponent sau khi toggle visibility */
+  /** Goi tu AppComponent sau khi toggle visibility */
   refreshMap(): void {
     this.layerService.getHiddenCellIds().subscribe({
       next: (ids) => {
@@ -50,7 +50,27 @@ export class MapComponent implements OnInit, OnDestroy {
     });
   }
 
-  // ─── Map init ──────────────────────────────────────────────────────────────
+  // --- Color helpers ---------------------------------------------------------
+
+  /** Fill color by count (0 = off-cell). */
+  static getColor(count: number): string {
+    if (count <= 0)  return '#FF0000';  // OFF
+    if (count < 5)   return '#0099FF';  // Very Weak  (1-4)
+    if (count < 15)  return '#00CCFF';  // Weak       (5-14)
+    if (count < 40)  return '#00FFCC';  // Medium    (15-39)
+    if (count < 100) return '#00FF99';  // Strong    (40-99)
+    return                  '#00FF00';  // Very Strong (>=100)
+  }
+
+  /** Darken a #RRGGBB hex color by 20%. */
+  private static darken(hex: string): string {
+    const r = Math.round(parseInt(hex.slice(1, 3), 16) * 0.8);
+    const g = Math.round(parseInt(hex.slice(3, 5), 16) * 0.8);
+    const b = Math.round(parseInt(hex.slice(5, 7), 16) * 0.8);
+    return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+  }
+
+  // --- Map init --------------------------------------------------------------
 
   private initMap(): void {
     this.map = L.map('map', {
@@ -63,7 +83,6 @@ export class MapComponent implements OnInit, OnDestroy {
     L.control.zoom({ position: 'topright' }).addTo(this.map);
     L.control.scale({ position: 'bottomleft' }).addTo(this.map);
 
-    // MapLibre GL layer wrapping the full style (base + overlays)
     this.glLayer = L.maplibreGL({
       style: {
         version: 8,
@@ -81,9 +100,12 @@ export class MapComponent implements OnInit, OnDestroy {
             minzoom: 0,
             maxzoom: 11
           },
-          'wms-binary': {
+          // Single composite source: backend merges on-cell (normal) and off-cell
+          // (red) tiles pixel-by-pixel so pixels covered by any on-cell always
+          // show the normal coverage colour, never red.
+          'wms-composite': {
             type: 'raster',
-            tiles: [this.buildWmsUrl('')],
+            tiles: [this.buildWmsCompositeUrl('')],
             tileSize: 256,
             maxzoom: 13
           }
@@ -98,22 +120,64 @@ export class MapComponent implements OnInit, OnDestroy {
             maxzoom: MapComponent.ZOOM_WMS,
             paint: {
               'fill-color': [
-                'interpolate', ['linear'], ['get', 'count'],
-                0,  'rgba(0,0,0,0)',
-                1,  '#d4f1f9',
-                5,  '#7ab7ce',
-                15, '#2C788E',
-                40, '#1e6b80',
-                100,'#155e70'
+                'case',
+                ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], '#FF0000',
+                ['>=', ['get', 'count'], 100], '#00FF00',
+                ['>=', ['get', 'count'], 40],  '#00FF99',
+                ['>=', ['get', 'count'], 15],  '#00FFCC',
+                ['>=', ['get', 'count'], 5],   '#00CCFF',
+                ['>', ['get', 'count'], 0],    '#0099FF',
+                'transparent'
               ],
-              'fill-opacity': 0.55,
-              'fill-outline-color': 'rgba(0,0,0,0)'
+              'fill-opacity': [
+                'case',
+                ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], 0.75,
+                ['>=', ['get', 'count'], 100], 0.85,
+                ['>=', ['get', 'count'], 40],  0.75,
+                ['>=', ['get', 'count'], 15],  0.65,
+                ['>=', ['get', 'count'], 5],   0.55,
+                ['>', ['get', 'count'], 0],    0.45,
+                0
+              ],
+              'fill-outline-color': [
+                'case',
+                ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], '#CC0000',
+                ['>=', ['get', 'count'], 100], '#00CC00',
+                ['>=', ['get', 'count'], 40],  '#00CC7A',
+                ['>=', ['get', 'count'], 15],  '#00CCA3',
+                ['>=', ['get', 'count'], 5],   '#00A3CC',
+                ['>', ['get', 'count'], 0],    '#007ACC',
+                'transparent'
+              ]
             }
           },
           {
-            id: 'wms-raster',
+            id: 'hex-stroke',
+            type: 'line',
+            source: 'hex-coverage',
+            'source-layer': 'hex_coverage',
+            maxzoom: MapComponent.ZOOM_WMS,
+            paint: {
+              'line-color': [
+                'case',
+                ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], '#CC0000',
+                ['>=', ['get', 'count'], 100], '#00CC00',
+                ['>=', ['get', 'count'], 40],  '#00CC7A',
+                ['>=', ['get', 'count'], 15],  '#00CCA3',
+                ['>=', ['get', 'count'], 5],   '#00A3CC',
+                ['>', ['get', 'count'], 0],    '#007ACC',
+                'transparent'
+              ],
+              'line-width': 0.5,
+              'line-opacity': 1.0
+            }
+          },
+          {
+            // Composite tile: backend already applies pixel-accurate logic
+            // (on-cell pixels take priority over off-cell red pixels).
+            id: 'wms-composite-raster',
             type: 'raster',
-            source: 'wms-binary',
+            source: 'wms-composite',
             minzoom: MapComponent.ZOOM_WMS,
             paint: {
               'raster-opacity': 0.65,
@@ -130,12 +194,14 @@ export class MapComponent implements OnInit, OnDestroy {
       this.applyToggleByZoom();
     });
 
+    this.addLegend();
+
     this.map.on('moveend', () => {
       this.moveEnd$.next(this.map.getBounds());
     });
   }
 
-  // ─── Popup (Leaflet popup triggered by MapLibre feature query) ─────────────
+  // --- Popup -----------------------------------------------------------------
 
   private setupPopup(): void {
     const glMap = this.glLayer.getMaplibreMap();
@@ -157,7 +223,7 @@ export class MapComponent implements OnInit, OnDestroy {
     });
   }
 
-  // ─── Zoom badge (debug/UX) ─────────────────────────────────────────────────
+  // --- Zoom badge ------------------------------------------------------------
 
   private setupZoomBadge(): void {
     this.map.on('zoom', () => {
@@ -174,7 +240,7 @@ export class MapComponent implements OnInit, OnDestroy {
     });
   }
 
-  // ─── Move end → fetch coverages ───────────────────────────────────────────
+  // --- Move end -> fetch coverages -------------------------------------------
 
   private initMoveEndSubscription(): void {
     this.subscription = this.moveEnd$.pipe(
@@ -203,7 +269,7 @@ export class MapComponent implements OnInit, OnDestroy {
     this.applyToggleByZoom();
   }
 
-  // ─── Toggle logic theo zoom ────────────────────────────────────────────────
+  // --- Toggle logic by zoom --------------------------------------------------
 
   private applyToggleByZoom(): void {
     const glMap = this.glLayer?.getMaplibreMap();
@@ -215,7 +281,6 @@ export class MapComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Zoom 0–11: bust tile cache để server recompute hex density */
   private reloadHexTiles(): void {
     const glMap = this.glLayer.getMaplibreMap();
     const src = glMap.getSource('hex-coverage') as VectorTileSource;
@@ -224,19 +289,55 @@ export class MapComponent implements OnInit, OnDestroy {
     ]);
   }
 
-  /** Zoom 12+: cập nhật WMS proxy URL với hidden IDs mới */
   private updateWmsSource(): void {
     const hiddenKey = [...this.hiddenCellIds].sort().join(',');
     if (hiddenKey === this.currentCqlFilter) return;
     this.currentCqlFilter = hiddenKey;
 
     const glMap = this.glLayer.getMaplibreMap();
-    const src = glMap.getSource('wms-binary') as RasterTileSource;
-    src?.setTiles([this.buildWmsUrl(hiddenKey)]);
+    const src = glMap.getSource('wms-composite') as RasterTileSource;
+    src?.setTiles([this.buildWmsCompositeUrl(hiddenKey)]);
   }
 
-  private buildWmsUrl(hiddenIds: string): string {
-    const base = `${environment.apiUrl}/wms-tile?bbox={bbox-epsg-3857}`;
+  private buildWmsCompositeUrl(hiddenIds: string): string {
+    const base = `${environment.apiUrl}/wms-tile-composite?bbox={bbox-epsg-3857}`;
     return hiddenIds ? `${base}&hidden=${encodeURIComponent(hiddenIds)}` : base;
+  }
+
+  // --- Legend ----------------------------------------------------------------
+
+  private addLegend(): void {
+    const grades: { label: string; color: string; dashed?: boolean }[] = [
+      { label: 'Very Strong (>=100)', color: 'rgba(  0,255,  0, 0.85)' },
+      { label: 'Strong    (40-99)',   color: 'rgba(  0,255,153, 0.75)' },
+      { label: 'Medium    (15-39)',   color: 'rgba(  0,255,204, 0.65)' },
+      { label: 'Weak       (5-14)',   color: 'rgba(  0,204,255, 0.55)' },
+      { label: 'Very Weak   (1-4)',   color: 'rgba(  0,153,255, 0.45)' },
+      { label: 'OFF (cell off)',      color: 'rgba(255,  0,  0, 0.75)', dashed: true },
+    ];
+
+    const LegendControl = L.Control.extend({
+      onAdd(): HTMLElement {
+        const div = L.DomUtil.create('div', 'hex-legend');
+        div.innerHTML = `
+          <div class="hex-legend__title">Signal Density</div>
+          ${grades.map(g => {
+            const extra = g.dashed
+              ? 'outline: 1.5px dashed #CC0000; outline-offset: -2px;'
+              : '';
+            return `
+            <div class="hex-legend__item">
+              <span class="hex-legend__swatch" style="background:${g.color};${extra}"></span>
+              <span class="hex-legend__label">${g.label}</span>
+            </div>`;
+          }).join('')}
+        `;
+        L.DomEvent.disableClickPropagation(div);
+        L.DomEvent.disableScrollPropagation(div);
+        return div;
+      }
+    });
+
+    new LegendControl({ position: 'bottomright' }).addTo(this.map);
   }
 }

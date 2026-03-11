@@ -42,6 +42,16 @@ public class RasterCoverageService {
         return repository.toggleVisibility(cellId, visible);
     }
 
+    /**
+     * Returns a GeoJSON geometry string representing the areas exclusively covered
+     * by off-cells (no on-cell overlaps them) within the given viewport.
+     * Returns null if there are no off-cells in the viewport.
+     */
+    @Transactional(readOnly = true)
+    public String findOffOnlyGeometry(double minx, double miny, double maxx, double maxy) {
+        return repository.findOffOnlyGeometry(minx, miny, maxx, maxy);
+    }
+
     private Polygon createBboxPolygon(double minx, double miny, double maxx, double maxy) {
         Coordinate[] coords = new Coordinate[]{
                 new Coordinate(minx, miny),

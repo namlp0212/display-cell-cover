@@ -30,4 +30,19 @@ export class LayerService {
   getHiddenCellIds(): Observable<string[]> {
     return this.http.get<string[]>(`${this.apiUrl}/hidden-cells`);
   }
+
+  /**
+   * Returns a GeoJSON geometry representing areas covered exclusively by off-cells.
+   * The backend computes: ST_Difference(union_of_off_cells, union_of_on_cells).
+   * Returns null when there is nothing to render (204 No Content from backend).
+   */
+  getOffOnlyArea(minx: number, miny: number, maxx: number, maxy: number): Observable<GeoJSON.Geometry | null> {
+    const params = new HttpParams()
+      .set('minx', minx.toString())
+      .set('miny', miny.toString())
+      .set('maxx', maxx.toString())
+      .set('maxy', maxy.toString());
+
+    return this.http.get<GeoJSON.Geometry | null>(`${this.apiUrl}/off-only-area`, { params });
+  }
 }
