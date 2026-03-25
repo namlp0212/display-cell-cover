@@ -37,6 +37,11 @@ public class RasterCoverageService {
         return repository.findHiddenCellIds();
     }
 
+    @Transactional(readOnly = true)
+    public List<String> findVisibleCellIds() {
+        return repository.findVisibleCellIds();
+    }
+
     @Transactional
     public int toggleVisibility(String cellId, boolean visible) {
         return repository.toggleVisibility(cellId, visible);
@@ -74,6 +79,8 @@ public class RasterCoverageService {
                 entity.getCrs(),
                 entity.isSvr(),
                 entity.isVisible(),
+                entity.getAvgSignal(),
+                entity.getMaxSignal(),
                 entity.getCreatedAt()
         );
     }

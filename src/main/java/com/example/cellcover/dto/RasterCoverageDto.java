@@ -12,6 +12,8 @@ public record RasterCoverageDto(
         String crs,
         boolean svr,
         boolean visible,
+        Double avgSignal,
+        Double maxSignal,
         OffsetDateTime createdAt
 ) {
 }

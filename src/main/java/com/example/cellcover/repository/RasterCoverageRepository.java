@@ -11,7 +11,7 @@ import java.util.List;
 
 public interface RasterCoverageRepository extends JpaRepository<RasterCoverage, Long> {
 
-    @Query("SELECT r FROM RasterCoverage r WHERE r.svr = true AND ST_Intersects(r.bbox, :viewport) = true")
+    @Query("SELECT r FROM RasterCoverage r WHERE r.svr = false AND ST_Intersects(r.bbox, :viewport) = true")
     List<RasterCoverage> findInViewport(@Param("viewport") Geometry viewport);
 
     @Query("SELECT DISTINCT r.cellId FROM RasterCoverage r")
@@ -22,6 +22,26 @@ public interface RasterCoverageRepository extends JpaRepository<RasterCoverage, 
 
     @Query("SELECT DISTINCT r.cellId FROM RasterCoverage r WHERE r.visible = false")
     List<String> findHiddenCellIds();
+
+    @Query("SELECT DISTINCT r.cellId FROM RasterCoverage r WHERE r.visible = true")
+    List<String> findVisibleCellIds();
+
+    @Query("SELECT r.cellId, r.ovlpGroup FROM RasterCoverage r WHERE r.svr = false GROUP BY r.cellId, r.ovlpGroup")
+    List<Object[]> findCellIdAndOvlpGroup();
+
+    /** All non-SVR cells (visible or hidden) whose bbox intersects the given EPSG:4326 envelope. */
+    @Query(value = "SELECT * FROM raster_coverages WHERE is_svr = false AND ST_Intersects(bbox, ST_MakeEnvelope(:minx, :miny, :maxx, :maxy, 4326))",
+           nativeQuery = true)
+    List<RasterCoverage> findAllNonSvrInBbox(
+            @Param("minx") double minx, @Param("miny") double miny,
+            @Param("maxx") double maxx, @Param("maxy") double maxy);
+
+    /** Visible, non-SVR cells whose bbox intersects the given EPSG:4326 envelope. */
+    @Query(value = "SELECT * FROM raster_coverages WHERE is_visible = true AND is_svr = false AND ST_Intersects(bbox, ST_MakeEnvelope(:minx, :miny, :maxx, :maxy, 4326))",
+           nativeQuery = true)
+    List<RasterCoverage> findVisibleNonSvrInBbox(
+            @Param("minx") double minx, @Param("miny") double miny,
+            @Param("maxx") double maxx, @Param("maxy") double maxy);
 
     @Modifying
     @Query("DELETE FROM RasterCoverage r WHERE r.cellId IN :cellIds")

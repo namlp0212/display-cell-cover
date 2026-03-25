@@ -11,6 +11,8 @@ export interface RasterCoverage {
   crs: string;
   svr: boolean;
   visible: boolean;
+  avgSignal?: number | null;
+  maxSignal?: number | null;
   createdAt: string;
 }
 

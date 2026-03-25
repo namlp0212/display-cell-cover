@@ -34,6 +34,12 @@ public class RasterCoverage {
     @Column(name = "ovlp_group", nullable = false)
     private int ovlpGroup;
 
+    @Column(name = "avg_signal")
+    private Double avgSignal;
+
+    @Column(name = "max_signal")
+    private Double maxSignal;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 
@@ -106,6 +112,22 @@ public class RasterCoverage {
 
     public void setOvlpGroup(int ovlpGroup) {
         this.ovlpGroup = ovlpGroup;
+    }
+
+    public Double getAvgSignal() {
+        return avgSignal;
+    }
+
+    public void setAvgSignal(Double avgSignal) {
+        this.avgSignal = avgSignal;
+    }
+
+    public Double getMaxSignal() {
+        return maxSignal;
+    }
+
+    public void setMaxSignal(Double maxSignal) {
+        this.maxSignal = maxSignal;
     }
 
     public OffsetDateTime getCreatedAt() {

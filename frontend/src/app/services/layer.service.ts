@@ -31,6 +31,10 @@ export class LayerService {
     return this.http.get<string[]>(`${this.apiUrl}/hidden-cells`);
   }
 
+  getVisibleCellIds(): Observable<string[]> {
+    return this.http.get<string[]>(`${this.apiUrl}/visible-cells`);
+  }
+
   /**
    * Returns a GeoJSON geometry representing areas covered exclusively by off-cells.
    * The backend computes: ST_Difference(union_of_off_cells, union_of_on_cells).

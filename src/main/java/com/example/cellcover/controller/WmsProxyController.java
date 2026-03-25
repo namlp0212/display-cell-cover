@@ -1,14 +1,25 @@
 package com.example.cellcover.controller;
 
+import com.example.cellcover.repository.RasterCoverageRepository;
+import com.example.cellcover.service.SignalTileService;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import javax.imageio.ImageIO;
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.geom.Path2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -21,6 +32,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -35,7 +47,14 @@ public class WmsProxyController {
     @Value("${geoserver.overlap-groups}")
     private int overlapGroups;
 
+    @Autowired
+    private SignalTileService signalTileService;
+
+    @Autowired
+    private RasterCoverageRepository rasterCoverageRepository;
+
     private final HttpClient httpClient = HttpClient.newHttpClient();
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     // Off-cell colour: #FF0000
     private static final int OFF_CELL_RGB = 0xFF0000;
@@ -43,7 +62,9 @@ public class WmsProxyController {
     // On-cell density colours (Green → Light Blue, matching hex heatmap scheme).
     // Alpha accumulated by GeoServer's overlap-group stacking is used as density proxy.
     private static final int[] DENSITY_RGB   = { 0x00FF00, 0x00FF99, 0x00FFCC, 0x00CCFF, 0x0099FF };
-    private static final int[] DENSITY_ALPHA = { 200,      150,      100,       60,        0 };
+    // Calibrated for SLD opacity=0.55, 8 overlap groups: α_N = round((1 - 0.45^N) × 255)
+    // N=1→140, N=2→203, N=3→232, N=4→245, N=5+→250
+    private static final int[] DENSITY_ALPHA = { 250,      245,      232,      203,        0 };
 
     // ── public endpoints ───────────────────────────────────────────────────────
 
@@ -59,45 +80,109 @@ public class WmsProxyController {
      * stacking overlapGroups copies of the binary layer — more overlapping cells
      * produce a higher alpha value at that pixel.
      */
-    @GetMapping("/wms-tile-composite")
-    public ResponseEntity<byte[]> proxyWmsTileComposite(
-            @RequestParam("bbox") String bbox,
-            @RequestParam(value = "hidden", required = false, defaultValue = "") String hidden
+    /** Convert TMS tile x/y/z to EPSG:3857 bbox string "minx,miny,maxx,maxy". */
+    private static String tileToBbox(int x, int y, int z) {
+        double n = Math.pow(2, z);
+        double tileSize = 2 * Math.PI * 6378137 / n;
+        double minx = x * tileSize - Math.PI * 6378137;
+        double maxx = minx + tileSize;
+        double maxy = Math.PI * 6378137 - y * tileSize;
+        double miny = maxy - tileSize;
+        return String.format("%.4f,%.4f,%.4f,%.4f", minx, miny, maxx, maxy);
+    }
+
+    @GetMapping("/wms-tile/{z}/{x}/{y}")
+    public ResponseEntity<byte[]> proxyWmsTileCompositeXYZ(
+            @PathVariable int z, @PathVariable int x, @PathVariable int y
     ) throws Exception {
+        return proxyWmsTileComposite(tileToBbox(x, y, z));
+    }
+
+    @GetMapping("/wms-tile-signal/{z}/{x}/{y}")
+    public ResponseEntity<byte[]> proxyWmsTileSignalXYZ(
+            @PathVariable int z, @PathVariable int x, @PathVariable int y,
+            @RequestParam(value = "mode", required = false, defaultValue = "max") String mode
+    ) throws Exception {
+        return proxyWmsTileSignal(tileToBbox(x, y, z), mode);
+    }
+
+    @GetMapping("/wms-tile-xyz")
+    public ResponseEntity<byte[]> proxyWmsTileCompositeQP(
+            @RequestParam int z, @RequestParam int x, @RequestParam int y
+    ) throws Exception {
+        return proxyWmsTileComposite(tileToBbox(x, y, z));
+    }
+
+    @GetMapping("/wms-tile-signal-xyz")
+    public ResponseEntity<byte[]> proxyWmsTileSignalQP(
+            @RequestParam int z, @RequestParam int x, @RequestParam int y,
+            @RequestParam(value = "mode", required = false, defaultValue = "max") String mode
+    ) throws Exception {
+        return proxyWmsTileSignal(tileToBbox(x, y, z), mode);
+    }
+
+    @GetMapping("/wms-tile-composite")
+    public ResponseEntity<byte[]> proxyWmsTileCompositeGet(
+            @RequestParam("bbox") String bbox
+    ) throws Exception {
+        return proxyWmsTileComposite(bbox);
+    }
+
+    private ResponseEntity<byte[]> proxyWmsTileComposite(String bbox) throws Exception {
+        double[] wgs = bbox3857toWgs84(bbox);
 
         String layers = String.join(",", Collections.nCopies(overlapGroups, "cellcover:binary"));
         String styles = String.join(",", Collections.nCopies(overlapGroups, "cellcover-binary"));
+        // Fixed short CQL — only ovlp_group filter, no cell-ID list → never causes HTTP 414.
+        // GeoServer renders ALL cells (on + off); off-only areas are overridden with red below.
+        String cql = buildGroupFilter("");
 
-        if (hidden == null || hidden.isBlank()) {
-            // No hidden cells — recolor on-cell tile by density and return.
-            String cql = buildGroupFilter(buildExcludeFilter(""));
-            HttpResponse<byte[]> onResp = httpClient.send(
-                    buildHttpRequest(buildWmsUrl(bbox, layers, styles, cql)),
-                    HttpResponse.BodyHandlers.ofByteArray());
-            if (onResp.statusCode() != 200) return ResponseEntity.status(502).build();
-            byte[] recolored = recolorByDensity(onResp.body());
-            return ResponseEntity.ok().contentType(MediaType.IMAGE_PNG).body(recolored);
+        // Launch GeoServer request asynchronously while PostGIS query runs on this thread.
+        CompletableFuture<HttpResponse<byte[]>> geoFuture = httpClient.sendAsync(
+                buildHttpRequest(buildWmsUrl(bbox, layers, styles, cql)),
+                HttpResponse.BodyHandlers.ofByteArray());
+
+        // PostGIS: geometry of areas covered ONLY by off-cells (no on-cell overlap).
+        String offOnlyGeoJson = rasterCoverageRepository.findOffOnlyGeometry(
+                wgs[0], wgs[1], wgs[2], wgs[3]);
+
+        HttpResponse<byte[]> geoResp = geoFuture.join();
+        if (geoResp.statusCode() != 200) return ResponseEntity.status(502).build();
+
+        byte[] densityTile = recolorByDensity(geoResp.body());
+
+        if (offOnlyGeoJson == null) {
+            // No off-cells in viewport — pure on-cell density display.
+            return ResponseEntity.ok().contentType(MediaType.IMAGE_PNG).body(densityTile);
         }
 
-        String onCql  = buildGroupFilter(buildExcludeFilter(hidden));
-        String offCql = buildGroupFilter(buildIncludeFilter(hidden));
+        // Rasterize off-only geometry to a red PNG and composite over density tile.
+        byte[] redTile = rasterizeOffCellGeometry(offOnlyGeoJson, bbox);
+        return ResponseEntity.ok().contentType(MediaType.IMAGE_PNG)
+                .body(compositeOffOverDensity(densityTile, redTile));
+    }
 
-        CompletableFuture<HttpResponse<byte[]>> onFuture  = httpClient.sendAsync(
-                buildHttpRequest(buildWmsUrl(bbox, layers, styles, onCql)),  HttpResponse.BodyHandlers.ofByteArray());
-        CompletableFuture<HttpResponse<byte[]>> offFuture = httpClient.sendAsync(
-                buildHttpRequest(buildWmsUrl(bbox, layers, styles, offCql)), HttpResponse.BodyHandlers.ofByteArray());
+    private ResponseEntity<byte[]> transparentResponse() throws Exception {
+        BufferedImage img = new BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ImageIO.write(img, "png", baos);
+        return ResponseEntity.ok().contentType(MediaType.IMAGE_PNG).body(baos.toByteArray());
+    }
 
-        HttpResponse<byte[]> onResp  = onFuture.join();
-        HttpResponse<byte[]> offResp = offFuture.join();
+    /** Signal strength tile — per-pixel MAX or AVG across all DB-visible cells in bbox. */
+    @GetMapping("/wms-tile-signal")
+    public ResponseEntity<byte[]> proxyWmsTileSignalGet(
+            @RequestParam("bbox") String bbox,
+            @RequestParam(value = "mode", required = false, defaultValue = "max") String mode
+    ) throws Exception {
+        return proxyWmsTileSignal(bbox, mode);
+    }
 
-        if (onResp.statusCode() != 200 || offResp.statusCode() != 200) {
-            return ResponseEntity.status(502).build();
-        }
-
-        byte[] onDensity  = recolorByDensity(onResp.body());
-        byte[] offRed     = recolorToRed(offResp.body());
-        byte[] composited = compositeTiles(onDensity, offRed);
-        return ResponseEntity.ok().contentType(MediaType.IMAGE_PNG).body(composited);
+    private ResponseEntity<byte[]> proxyWmsTileSignal(String bbox, String mode) throws Exception {
+        byte[] tile = "avg".equals(mode)
+                ? signalTileService.renderAvgSignalTile(bbox, Set.of(), Set.of(), false)
+                : signalTileService.renderMaxSignalTile(bbox, Set.of(), Set.of(), false);
+        return ResponseEntity.ok().contentType(MediaType.IMAGE_PNG).body(tile);
     }
 
     /**
@@ -114,6 +199,21 @@ public class WmsProxyController {
         String cql    = buildGroupFilter(buildExcludeFilter(hidden));
 
         return fetchAndReturn(buildHttpRequest(buildWmsUrl(bbox, layers, styles, cql)));
+    }
+
+    // ── coordinate helpers ─────────────────────────────────────────────────────
+
+    private static double[] bbox3857toWgs84(String bbox3857) {
+        String[] p = bbox3857.split(",");
+        double minX = Double.parseDouble(p[0].trim()), minY = Double.parseDouble(p[1].trim());
+        double maxX = Double.parseDouble(p[2].trim()), maxY = Double.parseDouble(p[3].trim());
+        double R = 20037508.342789244;
+        return new double[]{
+            minX / R * 180.0,
+            Math.toDegrees(2 * Math.atan(Math.exp(minY / R * Math.PI)) - Math.PI / 2),
+            maxX / R * 180.0,
+            Math.toDegrees(2 * Math.atan(Math.exp(maxY / R * Math.PI)) - Math.PI / 2)
+        };
     }
 
     // ── pixel operations ───────────────────────────────────────────────────────
@@ -217,6 +317,108 @@ public class WmsProxyController {
         return baos.toByteArray();
     }
 
+    /**
+     * Composite: off-only red pixels override density pixels.
+     * - red tile pixel is non-transparent  → paint red (off-only area)
+     * - else                               → keep density tile pixel (on-cell or transparent)
+     */
+    private byte[] compositeOffOverDensity(byte[] densityBytes, byte[] redBytes) throws IOException {
+        BufferedImage density = ImageIO.read(new ByteArrayInputStream(densityBytes));
+        BufferedImage red     = ImageIO.read(new ByteArrayInputStream(redBytes));
+        if (red == null)     return densityBytes;
+        if (density == null) return redBytes;
+
+        int w = density.getWidth(), h = density.getHeight();
+        BufferedImage result = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int redPx = red.getRGB(x, y);
+                result.setRGB(x, y, ((redPx >>> 24) & 0xFF) > 0 ? redPx : density.getRGB(x, y));
+            }
+        }
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ImageIO.write(result, "png", baos);
+        return baos.toByteArray();
+    }
+
+    /**
+     * Rasterizes a GeoJSON geometry (EPSG:4326) to a 256×256 red PNG clipped to the
+     * given tile bbox (EPSG:3857).  Used for off-only areas returned by PostGIS.
+     * Alpha = 140 matches GeoServer SLD opacity 0.55 for a single-cell layer.
+     */
+    private byte[] rasterizeOffCellGeometry(String geojson, String bbox3857) throws Exception {
+        BufferedImage img = new BufferedImage(256, 256, BufferedImage.TYPE_INT_ARGB);
+        if (geojson == null || geojson.isBlank()) {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            ImageIO.write(img, "png", baos);
+            return baos.toByteArray();
+        }
+
+        String[] p = bbox3857.split(",");
+        double tileMinX = Double.parseDouble(p[0].trim());
+        double tileMinY = Double.parseDouble(p[1].trim());
+        double tileMaxX = Double.parseDouble(p[2].trim());
+        double tileMaxY = Double.parseDouble(p[3].trim());
+        double dX = tileMaxX - tileMinX, dY = tileMaxY - tileMinY;
+
+        JsonNode geo  = MAPPER.readTree(geojson);
+        String   type = geo.get("type").asText();
+
+        Graphics2D g2 = img.createGraphics();
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+        g2.setColor(new Color(0xFF, 0x00, 0x00, 140));
+
+        switch (type) {
+            case "Polygon" ->
+                g2.fill(toPath2D(geo.get("coordinates"), tileMinX, tileMinY, dX, dY));
+            case "MultiPolygon" -> {
+                for (JsonNode poly : geo.get("coordinates"))
+                    g2.fill(toPath2D(poly, tileMinX, tileMinY, dX, dY));
+            }
+            case "GeometryCollection" -> {
+                for (JsonNode sub : geo.get("geometries")) {
+                    String st = sub.get("type").asText();
+                    if ("Polygon".equals(st))
+                        g2.fill(toPath2D(sub.get("coordinates"), tileMinX, tileMinY, dX, dY));
+                    else if ("MultiPolygon".equals(st))
+                        for (JsonNode poly : sub.get("coordinates"))
+                            g2.fill(toPath2D(poly, tileMinX, tileMinY, dX, dY));
+                }
+            }
+        }
+
+        g2.dispose();
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ImageIO.write(img, "png", baos);
+        return baos.toByteArray();
+    }
+
+    /**
+     * Converts a GeoJSON Polygon coordinate array (list of rings) to a Path2D in pixel space.
+     * Coordinates are WGS-84 (lon/lat) and are projected to EPSG:3857 then mapped to 0–256 pixels.
+     * WIND_EVEN_ODD handles holes correctly without extra winding logic.
+     */
+    private Path2D toPath2D(JsonNode rings, double tileMinX, double tileMinY, double dX, double dY) {
+        Path2D.Double path = new Path2D.Double(Path2D.WIND_EVEN_ODD);
+        for (JsonNode ring : rings) {
+            boolean first = true;
+            for (JsonNode coord : ring) {
+                double lon = coord.get(0).asDouble();
+                double lat = coord.get(1).asDouble();
+                // WGS-84 → EPSG:3857
+                double x3857 = lon * 20037508.342789244 / 180.0;
+                double y3857 = Math.log(Math.tan(Math.PI / 4.0 + Math.toRadians(lat) / 2.0)) * 6378137.0;
+                // 3857 → pixel (y-axis flipped)
+                double px = (x3857 - tileMinX) / dX * 256.0;
+                double py = (1.0 - (y3857 - tileMinY) / dY) * 256.0;
+                if (first) { path.moveTo(px, py); first = false; }
+                else         path.lineTo(px, py);
+            }
+            path.closePath();
+        }
+        return path;
+    }
+
     // ── helpers ────────────────────────────────────────────────────────────────
 
     private String buildGroupFilter(String cellFilter) {
@@ -245,17 +447,27 @@ public class WmsProxyController {
                 .collect(Collectors.joining(","));
     }
 
+    private Set<String> csvToSet(String csv) {
+        if (csv == null || csv.isBlank()) return Set.of();
+        return Arrays.stream(csv.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toSet());
+    }
+
     private String buildWmsUrl(String bbox, String layers, String styles, String cqlFilter) {
-        return new StringBuilder(geoServerUrl + "/wms")
+        StringBuilder sb = new StringBuilder(geoServerUrl + "/wms")
                 .append("?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap")
                 .append("&LAYERS=").append(URLEncoder.encode(layers, StandardCharsets.UTF_8))
                 .append("&STYLES=").append(URLEncoder.encode(styles, StandardCharsets.UTF_8))
-                .append("&FORMAT=image%2Fpng&TRANSPARENT=true")
-                .append("&CQL_FILTER=").append(URLEncoder.encode(cqlFilter, StandardCharsets.UTF_8))
-                .append("&WIDTH=256&HEIGHT=256")
+                .append("&FORMAT=image%2Fpng&TRANSPARENT=true");
+        if (cqlFilter != null && !cqlFilter.isBlank()) {
+            sb.append("&CQL_FILTER=").append(URLEncoder.encode(cqlFilter, StandardCharsets.UTF_8));
+        }
+        sb.append("&WIDTH=256&HEIGHT=256")
                 .append("&BBOX=").append(URLEncoder.encode(bbox, StandardCharsets.UTF_8))
-                .append("&SRS=EPSG%3A3857")
-                .toString();
+                .append("&SRS=EPSG%3A3857");
+        return sb.toString();
     }
 
     private HttpRequest buildHttpRequest(String url) {

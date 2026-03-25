@@ -23,3 +23,6 @@ spring.log
 
 ### Raster data ###
 data/rasters/
+data/cog/
+data/geoserver/
+test_data/

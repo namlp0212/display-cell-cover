@@ -37,6 +37,11 @@ public class RasterCoverageController {
         return service.findHiddenCellIds();
     }
 
+    @GetMapping("/visible-cells")
+    public List<String> getVisibleCellIds() {
+        return service.findVisibleCellIds();
+    }
+
     @PostMapping("/toggle/{cellId}")
     public ResponseEntity<Map<String, Object>> toggleVisibility(
             @PathVariable("cellId") String cellId,

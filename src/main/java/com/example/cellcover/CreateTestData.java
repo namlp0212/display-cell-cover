@@ -10,6 +10,20 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
+/**
+ * Generates synthetic cell coverage data using hexagonal grid placement.
+ *
+ * Cell template (BNH0034_3) dimensions: 6.6 km × 5.6 km bounding box.
+ *
+ * Spacing rules (center-to-center):
+ *   5.5 km → urban core   : ~15% border overlap (realistic dense network)
+ *   7.5 km → suburban/KCN : cells just touch at edges
+ *  10.0 km → rural plains  : small gaps between cells
+ *  14.0 km → mountain/sparse: large gaps (limited coverage)
+ *
+ * Cells are placed in a hex grid (not random scatter) so adjacent cells
+ * overlap only at their borders — not stacked on top of each other.
+ */
 public class CreateTestData {
 
     private static final String BASE_DIR = "/Users/lenam/Documents/DisplayCellCover/data/rasters/";
@@ -50,16 +64,6 @@ public class CreateTestData {
                 + "AUTHORITY[\"EPSG\",\"326" + zone + "\"]]";
     }
 
-    /**
-     * Generate a single cell at a specific lat/lon position by cloning a template.
-     *
-     * @param templateCell source cell to clone (e.g. "BNH0034_3")
-     * @param outputPrefix prefix for generated cell names
-     * @param type         0 = continuous (.bil), 1 = binary (.svr.bil)
-     * @param lat          center latitude of the cell (WGS84)
-     * @param lon          center longitude of the cell (WGS84)
-     * @param idx          index for cell naming
-     */
     private static void generateSingleCell(String templateCell, String outputPrefix, int type,
                                             double lat, double lon, int idx) throws IOException {
         String fileType = type == 0 ? "" : ".svr";
@@ -68,10 +72,15 @@ public class CreateTestData {
 
         List<String> lines = Files.readAllLines(Paths.get(templateHdr));
         int ulxIndex = -1, ulyIndex = -1;
+        double ncolsVal = 0, nrowsVal = 0, xdimVal = 0, ydimVal = 0;
         for (int i = 0; i < lines.size(); i++) {
             String line = lines.get(i).trim().toLowerCase();
             if (line.startsWith("ulxmap")) ulxIndex = i;
             if (line.startsWith("ulymap")) ulyIndex = i;
+            if (line.startsWith("ncols"))  ncolsVal = Double.parseDouble(line.split("\\s+")[1]);
+            if (line.startsWith("nrows"))  nrowsVal = Double.parseDouble(line.split("\\s+")[1]);
+            if (line.startsWith("xdim"))   xdimVal  = Double.parseDouble(line.split("\\s+")[1]);
+            if (line.startsWith("ydim"))   ydimVal  = Double.parseDouble(line.split("\\s+")[1]);
         }
         if (ulxIndex == -1 || ulyIndex == -1) throw new RuntimeException("Missing ulxmap/ulymap in HDR");
 
@@ -79,16 +88,20 @@ public class CreateTestData {
         double[] utm = latLonToUtm(zone, lat, lon);
         String prj = utmPrjWkt(zone);
 
+        // ulxmap/ulymap is the TOP-LEFT corner of the raster.
+        // Subtract half-dimensions so the bounding box CENTER aligns with the target (lat, lon).
+        double ulx = utm[0] - (ncolsVal * xdimVal) / 2.0;
+        double uly = utm[1] + (nrowsVal * ydimVal) / 2.0;
+
         String cellName = outputPrefix + "_" + idx;
         String outputDir = BASE_DIR + cellName;
         Files.createDirectories(Paths.get(outputDir));
 
         List<String> newLines = new ArrayList<>(lines);
-        newLines.set(ulxIndex, "ulxmap " + utm[0]);
-        newLines.set(ulyIndex, "ulymap " + utm[1]);
+        newLines.set(ulxIndex, "ulxmap " + ulx);
+        newLines.set(ulyIndex, "ulymap " + uly);
 
         Files.write(Paths.get(outputDir, cellName + fileType + ".hdr"), newLines);
-        // Use RELATIVE symlink so it works both on host and inside Docker container
         Path bilDst = Paths.get(outputDir, cellName + fileType + ".bil");
         if (!Files.exists(bilDst)) {
             Path relTarget = Paths.get(outputDir).toAbsolutePath()
@@ -99,47 +112,71 @@ public class CreateTestData {
     }
 
     /**
-     * Generate random cells distributed in clusters across Hanoi.
+     * Generate hexagonal grid points within a circular zone.
+     * Uses a global point list to prevent overlap between adjacent zones.
      *
-     * Cluster design (each cell is ~6.6km x 5.6km):
-     *  - Dense clusters   : scatter < 2km  → cells nearly fully overlap → very high coverage density
-     *  - Medium clusters  : scatter 3–5km  → partial overlap
-     *  - Sparse clusters  : scatter 6–9km  → some cells touch, some are isolated
-     *  - Large empty areas intentionally left uncovered (northeast, far west, far south)
-     *
-     * @param templateCell source cell to clone
-     * @param prefix       output prefix (e.g. "HN")
-     * @param rng          seeded random for reproducibility
-     * @param clusters     array of {centerLat, centerLon, numCells, scatterKm}
+     * @param centerLat  zone center latitude
+     * @param centerLon  zone center longitude
+     * @param radiusKm   radius of the zone in km
+     * @param spacingKm  center-to-center distance between neighboring cells
+     * @param rng        seeded RNG for small positional jitter
+     * @param allPoints  all previously placed points (modified in place)
+     * @return list of new {lat, lon} points placed in this zone
      */
-    private static int generateRandomClusters(String templateCell, String prefix,
-                                               Random rng, double[][] clusters,
-                                               int startIdx) throws IOException {
-        int idx = startIdx;
-        for (double[] cluster : clusters) {
-            double cLat    = cluster[0];
-            double cLon    = cluster[1];
-            int    n       = (int) cluster[2];
-            double scatter = cluster[3]; // km radius
+    private static List<double[]> hexGridPoints(double centerLat, double centerLon,
+                                                 double radiusKm, double spacingKm,
+                                                 Random rng, List<double[]> allPoints) {
+        // Hex grid geometry
+        double xStep = spacingKm;
+        double yStep = spacingKm * Math.sqrt(3.0) / 2.0;
+        // 5% positional jitter for natural appearance
+        double jitter = spacingKm * 0.05;
+        // 4.5 km exclusion radius:
+        // - Same-zone hex cells at 5.5 km spacing: min pair = 5.5 - 2×jitter(0.275) = 4.95 km > 4.5 ✓
+        // - Adjacent non-overlapping zones: boundary gap ≈ 5-6 km > 4.5 ✓
+        // - Zones wholly inside another zone: all candidates within 3.18 km of existing cells → 0 new cells (correct)
+        double minDist2 = 4.5 * 4.5;
 
-            for (int i = 0; i < n; i++) {
-                // Uniform distribution within a disk (not a square) for natural feel
+        int rows = (int) Math.ceil(radiusKm / yStep);
+        int cols = (int) Math.ceil(radiusKm / xStep);
+
+        List<double[]> placed = new ArrayList<>();
+
+        for (int row = -rows; row <= rows; row++) {
+            for (int col = -cols; col <= cols; col++) {
+                // Offset alternating rows by half a column for hex pattern
+                double xKm = col * xStep + ((row & 1) != 0 ? xStep / 2.0 : 0.0);
+                double yKm = row * yStep;
+
+                // Skip points outside the circular zone
+                if (xKm * xKm + yKm * yKm > radiusKm * radiusKm) continue;
+
+                // Apply small random jitter
                 double angle = rng.nextDouble() * 2 * Math.PI;
-                double r     = Math.sqrt(rng.nextDouble()) * scatter; // uniform in disk
+                double jr = rng.nextDouble() * jitter;
+                xKm += jr * Math.cos(angle);
+                yKm += jr * Math.sin(angle);
 
-                // km offset → degree offset
-                double dLat = (r * Math.cos(angle)) / 111.0;
-                double dLon = (r * Math.sin(angle)) / (111.0 * Math.cos(Math.toRadians(cLat)));
+                double lat = centerLat + yKm / 111.0;
+                double lon = centerLon + xKm / (111.0 * Math.cos(Math.toRadians(centerLat)));
 
-                double lat = cLat + dLat;
-                double lon = cLon + dLon;
+                // Check minimum distance from all existing points
+                boolean tooClose = false;
+                for (double[] ex : allPoints) {
+                    double dy = (lat - ex[0]) * 111.0;
+                    double dx = (lon - ex[1]) * 111.0 * Math.cos(Math.toRadians(lat));
+                    if (dy * dy + dx * dx < minDist2) {
+                        tooClose = true;
+                        break;
+                    }
+                }
+                if (tooClose) continue;
 
-                generateSingleCell(templateCell, prefix, 0, lat, lon, idx);  // continuous
-                generateSingleCell(templateCell, prefix, 1, lat, lon, idx);  // SVR binary
-                idx++;
+                allPoints.add(new double[]{lat, lon});
+                placed.add(new double[]{lat, lon});
             }
         }
-        return idx;
+        return placed;
     }
 
     public static void main(String[] args) throws IOException {
@@ -147,260 +184,202 @@ public class CreateTestData {
         String template = "BNH0034_3";
         String prefix   = "RC";
 
-        // ─────────────────────────────────────────────────────────────────
-        // DỮ LIỆU THỰC TẾ – Đồng bằng Bắc bộ + vùng phụ cận
+        // Global point registry — prevents any two cells being closer than 0.72×spacing
+        List<double[]> allPoints = new ArrayList<>();
+        int idx = 1;
+
+        // ─────────────────────────────────────────────────────────────────────
+        // Zone definitions: {centerLat, centerLon, radiusKm, spacingKm}
         //
-        // Nguyên tắc mật độ:
-        //   Lõi đô thị  : scatter  2–4 km, 60–120 cell → phủ dày, nhiều lớp
-        //   Ngoại ô/KCN : scatter  4–7 km,  20–55 cell → phủ vừa
-        //   Nông thôn đb: scatter  6–10 km, 10–20 cell → thưa, ít chồng
-        //   Vùng núi    : scatter  7–12 km,  3–10 cell → rất thưa, ven đường
+        //  spacingKm  |  density description
+        //  -----------+----------------------------------------------
+        //    5.5 km   |  Lõi đô thị   (biên cell chồng ~15%) ← DENSE
+        //    7.5 km   |  Ngoại ô/KCN  (cell vừa chạm biên)
+        //   10.0 km   |  Nông thôn đb (khoảng hở nhỏ giữa cells)
+        //   14.0 km   |  Vùng núi     (khoảng hở lớn, thưa)    ← SPARSE
         //
-        // {centerLat, centerLon, numCells, scatterKm}
-        // ─────────────────────────────────────────────────────────────────
-        double[][] clusters = {
+        // Cell template: 6.6km × 5.6km → tại spacing 5.5km chồng lấn ~15%
+        // ─────────────────────────────────────────────────────────────────────
+        double[][] zones = {
 
-            // ══ HÀ NỘI – LÕI ĐÔ THỊ ══════════════════════════════════════
-            { 21.028, 105.854, 120, 2.5 },  // Hoàn Kiếm/Ba Đình – trung tâm lịch sử
-            { 21.010, 105.840,  80, 3.5 },  // Đống Đa/Hai Bà Trưng
-            { 21.025, 105.875,  60, 3.0 },  // Hoàn Kiếm đông/Long Biên tây
-            { 21.048, 105.840,  50, 3.0 },  // Tây Hồ/Ba Đình bắc
-            { 20.990, 105.820,  50, 3.5 },  // Thanh Xuân/Cầu Giấy
-            { 21.065, 105.800,  40, 3.5 },  // Bắc Từ Liêm/Cầu Giấy bắc
+            // ══ HÀ NỘI LÕI ĐÔ THỊ ══════════════════════════════════════════
+            // Lõi đô thị HN phủ toàn bộ 12 quận nội thành (r=14 km):
+            // Cầu Giấy, Ba Đình, Đống Đa, Hai Bà Trưng, Hoàn Kiếm, Hoàng Mai,
+            // Long Biên, Nam Từ Liêm, Tây Hồ, Thanh Xuân + phần trong của Bắc Từ Liêm / Hà Đông
+            { 21.028, 105.854, 14.0,  5.5 },
 
-            // ── Hà Nội – Ngoại thành bắc ─────────────────────────────────
-            { 21.150, 105.860,  40, 7.0 },  // Đông Anh
-            { 21.270, 105.860,  15, 8.0 },  // Sóc Sơn thị trấn
-            { 21.185, 105.735,  20, 7.0 },  // Mê Linh
-            { 21.028, 105.933,  35, 6.0 },  // Gia Lâm/Long Biên đông
+            // ── Hà Nội – huyện ngoại thành (trung tâm đặt ngoài r=14 km) ─
+            { 21.185, 105.870, 10.0,  7.5 },  // Đông Anh (centre 17 km bắc)
+            { 21.270, 105.855,  8.0, 10.0 },  // Sóc Sơn
+            { 21.185, 105.735,  6.0, 10.0 },  // Mê Linh
+            { 21.030, 105.935,  8.0,  7.5 },  // Gia Lâm / Long Biên đông
+            { 20.870, 105.860,  8.0,  7.5 },  // Thường Tín
+            { 20.740, 105.910,  7.0, 10.0 },  // Phú Xuyên
+            { 20.970, 105.775, 10.0,  7.5 },  // Hà Đông / Nam Từ Liêm
+            { 20.920, 105.715,  7.0, 10.0 },  // Chương Mỹ
+            { 20.750, 105.700,  6.0, 14.0 },  // Ứng Hòa / Mỹ Đức (bán núi)
+            { 21.002, 105.635,  8.0, 10.0 },  // Quốc Oai
+            { 21.035, 105.560,  6.0, 10.0 },  // Thạch Thất
+            { 21.080, 105.410,  6.0, 14.0 },  // Ba Vì (núi)
 
-            // ── Hà Nội – Ngoại thành nam ─────────────────────────────────
-            { 20.970, 105.853,  35, 5.0 },  // Hoàng Mai/Thanh Trì
-            { 20.870, 105.860,  22, 6.0 },  // Thường Tín
-            { 20.740, 105.910,  12, 8.0 },  // Phú Xuyên – thưa
+            // ══ HẢI PHÒNG ════════════════════════════════════════════════════
+            { 20.855, 106.695, 10.0,  5.5 },  // Trung tâm TP
+            { 20.900, 106.660,  8.0,  7.5 },  // Hồng Bàng bắc / Thủy Nguyên
+            { 20.800, 106.730,  6.0,  7.5 },  // Kiến An / Dương Kinh
+            { 20.720, 107.050,  4.0, 10.0 },  // Cát Bà (đảo)
+            { 20.600, 106.790,  5.0, 10.0 },  // Tiên Lãng (nông thôn ven biển)
 
-            // ── Hà Nội – Ngoại thành tây ─────────────────────────────────
-            { 20.970, 105.775,  45, 7.0 },  // Hà Đông/Nam Từ Liêm
-            { 20.920, 105.715,  18, 8.0 },  // Chương Mỹ
-            { 20.750, 105.700,   7, 9.0 },  // Ứng Hòa/Mỹ Đức – thưa (bán núi)
-            { 21.002, 105.635,  20, 7.0 },  // Quốc Oai
-            { 21.035, 105.560,  10, 9.0 },  // Thạch Thất
-            { 21.080, 105.410,   6,10.0 },  // Ba Vì – núi, rất thưa
+            // ══ BẮC NINH ═════════════════════════════════════════════════════
+            { 21.186, 106.076,  8.0,  5.5 },  // TP Bắc Ninh
+            { 21.135, 105.985, 10.0,  5.5 },  // KCN Yên Phong (Samsung) + TX Từ Sơn
+            { 21.200, 106.180,  5.0,  7.5 },  // KCN Quế Võ
+            { 21.100, 106.080,  7.0, 10.0 },  // Gia Bình / Lương Tài
 
-            // ══ HẢI PHÒNG ══════════════════════════════════════════════════
-            { 20.855, 106.690,  80, 3.0 },  // Trung tâm TP Hải Phòng
-            { 20.840, 106.720,  40, 4.5 },  // Hải An/Lê Chân
-            { 20.900, 106.670,  30, 5.0 },  // Hồng Bàng bắc
-            { 20.800, 106.730,  18, 5.0 },  // Kiến An/Dương Kinh
-            { 20.970, 106.580,  12, 5.0 },  // Thủy Nguyên (KCN)
-            { 20.720, 107.050,   8, 4.0 },  // Cát Bà (đảo, tourist)
-            { 20.600, 106.790,   6, 6.0 },  // Tiên Lãng (nông thôn ven biển)
+            // ══ HẢI DƯƠNG ════════════════════════════════════════════════════
+            { 20.940, 106.335,  8.0,  5.5 },  // TP Hải Dương
+            { 21.130, 106.380,  6.0,  7.5 },  // TX Chí Linh
+            { 21.000, 106.510,  5.0,  7.5 },  // TX Kinh Môn
+            { 20.860, 106.200,  7.0, 10.0 },  // Bình Giang / Thanh Miện
+            { 20.780, 106.380,  6.0, 10.0 },  // Ninh Giang / Gia Lộc
 
-            // ══ BẮC NINH – KCN dày đặc ════════════════════════════════════
-            { 21.186, 106.076,  55, 3.5 },  // TP Bắc Ninh
-            { 21.140, 105.990,  50, 4.0 },  // KCN Yên Phong (Samsung) – rất dày
-            { 21.120, 105.970,  30, 4.0 },  // TX Từ Sơn (công nghiệp)
-            { 21.200, 106.180,  15, 4.0 },  // KCN Quế Võ
-            { 21.100, 106.080,  12, 5.0 },  // Gia Bình/Lương Tài (nông thôn)
+            // ══ HƯNG YÊN ══════════════════════════════════════════════════════
+            { 20.646, 106.051,  7.0,  5.5 },  // TP Hưng Yên
+            { 20.900, 106.040,  6.0,  5.5 },  // TX Mỹ Hào / Phố Nối (KCN)
+            { 20.820, 106.080,  6.0,  7.5 },  // Văn Giang / Khoái Châu
+            { 20.700, 106.100,  6.0, 10.0 },  // Ân Thi
+            { 20.560, 106.150,  5.0, 10.0 },  // Kim Động / Phù Cừ
 
-            // ══ HẢI DƯƠNG ══════════════════════════════════════════════════
-            { 20.940, 106.335,  50, 4.0 },  // TP Hải Dương
-            { 21.130, 106.380,  25, 4.5 },  // TX Chí Linh
-            { 21.000, 106.510,  18, 4.0 },  // TX Kinh Môn
-            { 20.860, 106.200,  12, 8.0 },  // Bình Giang/Thanh Miện (nông thôn)
-            { 20.780, 106.380,   9, 7.0 },  // Ninh Giang/Gia Lộc (nông thôn)
+            // ══ THÁI BÌNH ═════════════════════════════════════════════════════
+            { 20.450, 106.342,  8.0,  5.5 },  // TP Thái Bình
+            { 20.540, 106.430,  5.0,  7.5 },  // TX Đông Hưng
+            { 20.600, 106.200,  5.0, 10.0 },  // Hưng Hà
+            { 20.460, 106.220,  5.0, 10.0 },  // Vũ Thư / Kiến Xương
+            { 20.350, 106.500,  5.0, 10.0 },  // Thái Thụy (ven biển)
+            { 20.250, 106.430,  5.0, 10.0 },  // Tiền Hải (ven biển)
 
-            // ══ HƯNG YÊN ═══════════════════════════════════════════════════
-            { 20.646, 106.051,  40, 3.5 },  // TP Hưng Yên
-            { 20.900, 106.040,  30, 3.5 },  // TX Mỹ Hào/Phố Nối (KCN)
-            { 20.820, 106.080,  18, 4.5 },  // Văn Giang/Khoái Châu
-            { 20.700, 106.100,  12, 6.0 },  // Ân Thi (nông thôn)
-            { 20.560, 106.150,   9, 6.0 },  // Kim Động/Phù Cừ (nông thôn)
+            // ══ NAM ĐỊNH ══════════════════════════════════════════════════════
+            { 20.420, 106.168,  9.0,  5.5 },  // TP Nam Định
+            { 20.480, 106.040,  5.0,  7.5 },  // TX Mỹ Lộc
+            { 20.350, 106.100,  6.0, 10.0 },  // Vụ Bản / Ý Yên
+            { 20.380, 106.280,  5.0, 10.0 },  // Xuân Trường / Trực Ninh
+            { 20.290, 106.270,  5.0, 10.0 },  // Giao Thủy (ven biển)
+            { 20.170, 106.200,  5.0, 10.0 },  // Hải Hậu (ven biển)
 
-            // ══ THÁI BÌNH – đồng bằng dày ═════════════════════════════════
-            { 20.450, 106.342,  50, 4.0 },  // TP Thái Bình
-            { 20.540, 106.430,  14, 4.0 },  // TX Đông Hưng
-            { 20.600, 106.200,  10, 5.0 },  // Hưng Hà (nông thôn)
-            { 20.460, 106.220,   9, 5.0 },  // Vũ Thư/Kiến Xương
-            { 20.350, 106.500,   7, 5.0 },  // Thái Thụy (ven biển)
-            { 20.250, 106.430,   6, 5.0 },  // Tiền Hải (ven biển)
+            // ══ HÀ NAM ════════════════════════════════════════════════════════
+            { 20.541, 105.907,  7.0,  5.5 },  // TP Phủ Lý
+            { 20.620, 105.980,  5.0,  7.5 },  // TX Duy Tiên (KCN phía bắc)
+            { 20.480, 105.830,  5.0, 10.0 },  // Kim Bảng / Thanh Liêm (bán núi)
+            { 20.380, 106.010,  5.0, 10.0 },  // Bình Lục / Lý Nhân
 
-            // ══ NAM ĐỊNH ════════════════════════════════════════════════════
-            { 20.420, 106.168,  60, 3.5 },  // TP Nam Định
-            { 20.480, 106.040,  14, 5.0 },  // TX Mỹ Lộc (phía bắc)
-            { 20.350, 106.100,  10, 6.0 },  // Vụ Bản/Ý Yên (nông thôn)
-            { 20.380, 106.280,   9, 5.0 },  // Xuân Trường/Trực Ninh
-            { 20.290, 106.270,   7, 5.0 },  // Giao Thủy (ven biển)
-            { 20.170, 106.200,   5, 6.0 },  // Hải Hậu (ven biển, thưa)
+            // ══ NINH BÌNH ═════════════════════════════════════════════════════
+            { 20.253, 105.975,  7.0,  5.5 },  // TP Ninh Bình
+            { 20.210, 105.907,  6.0,  5.5 },  // TX Tam Điệp
+            { 20.330, 105.850,  5.0,  7.5 },  // Hoa Lư / Tràng An (du lịch)
+            { 20.350, 106.030,  5.0, 10.0 },  // Yên Khánh / Yên Mô
+            { 20.090, 106.170,  4.0, 10.0 },  // Kim Sơn (ven biển)
+            { 20.340, 105.650,  5.0, 14.0 },  // Nho Quan (núi)
 
-            // ══ HÀ NAM ══════════════════════════════════════════════════════
-            { 20.541, 105.907,  35, 3.5 },  // TP Phủ Lý
-            { 20.620, 105.980,  15, 4.0 },  // TX Duy Tiên (KCN phía bắc)
-            { 20.480, 105.830,  10, 5.0 },  // Kim Bảng/Thanh Liêm (bán núi)
-            { 20.380, 106.010,   8, 5.0 },  // Bình Lục/Lý Nhân (nông thôn)
+            // ══ VĨNH PHÚC ═════════════════════════════════════════════════════
+            { 21.310, 105.597,  8.0,  5.5 },  // TP Vĩnh Yên
+            { 21.250, 105.725,  7.0,  5.5 },  // TP Phúc Yên (KCN Toyota)
+            { 21.370, 105.620,  5.0,  7.5 },  // Tam Dương / Bình Xuyên
+            { 21.300, 105.480,  6.0, 10.0 },  // Vĩnh Tường / Yên Lạc
+            { 21.460, 105.645,  3.0, 14.0 },  // Tam Đảo (núi nghỉ dưỡng)
 
-            // ══ NINH BÌNH – du lịch + bán núi ═════════════════════════════
-            { 20.253, 105.975,  40, 4.0 },  // TP Ninh Bình
-            { 20.210, 105.907,  25, 4.0 },  // TX Tam Điệp
-            { 20.330, 105.850,  13, 4.0 },  // Hoa Lư/Tràng An (du lịch)
-            { 20.350, 106.030,  10, 5.0 },  // Yên Khánh/Yên Mô (nông thôn)
-            { 20.090, 106.170,   7, 5.0 },  // Kim Sơn (ven biển)
-            { 20.340, 105.650,   5, 8.0 },  // Nho Quan (núi, rất thưa)
+            // ══ THÁI NGUYÊN ════════════════════════════════════════════════════
+            { 21.592, 105.848,  9.0,  5.5 },  // TP Thái Nguyên
+            { 21.480, 105.820,  6.0,  5.5 },  // TX Sông Công (KCN Samsung)
+            { 21.300, 105.850,  7.0,  5.5 },  // TX Phổ Yên (KCN)
+            { 21.700, 105.900,  7.0, 10.0 },  // Đồng Hỷ / Phú Lương (bán núi)
+            { 21.800, 105.600,  5.0, 14.0 },  // Định Hóa (núi)
+            { 21.760, 106.100,  5.0, 14.0 },  // Võ Nhai (núi)
 
-            // ══ VĨNH PHÚC – đô thị + KCN Toyota ══════════════════════════
-            { 21.310, 105.597,  45, 4.0 },  // TP Vĩnh Yên
-            { 21.250, 105.725,  35, 4.0 },  // TP Phúc Yên (KCN Toyota)
-            { 21.370, 105.620,  12, 5.0 },  // Tam Dương/Bình Xuyên
-            { 21.300, 105.480,  10, 5.0 },  // Vĩnh Tường/Yên Lạc (nông thôn)
-            { 21.460, 105.645,   4, 5.0 },  // Tam Đảo (núi nghỉ dưỡng, rất thưa)
+            // ══ BẮC GIANG ══════════════════════════════════════════════════════
+            { 21.273, 106.194,  8.0,  5.5 },  // TP Bắc Giang
+            { 21.280, 106.050,  6.0,  5.5 },  // TX Việt Yên (KCN VSIP)
+            { 21.380, 106.200,  5.0,  7.5 },  // Lạng Giang
+            { 21.450, 106.120,  5.0,  7.5 },  // Tân Yên / Hiệp Hòa
+            { 21.350, 106.700,  5.0, 14.0 },  // Sơn Động (núi)
+            { 21.500, 106.400,  5.0, 14.0 },  // Lục Ngạn / Lục Nam (núi)
 
-            // ══ THÁI NGUYÊN – đô thị công nghiệp + bán núi ════════════════
-            { 21.592, 105.848,  50, 4.0 },  // TP Thái Nguyên
-            { 21.480, 105.820,  25, 4.0 },  // TX Sông Công (KCN Samsung)
-            { 21.300, 105.850,  25, 4.5 },  // TX Phổ Yên (KCN)
-            { 21.700, 105.900,  12, 6.0 },  // Đồng Hỷ/Phú Lương (bán núi)
-            { 21.800, 105.600,   5, 8.0 },  // Định Hóa (núi, rất thưa)
-            { 21.760, 106.100,   4, 8.0 },  // Võ Nhai (núi, rất thưa)
+            // ══ PHÚ THỌ ════════════════════════════════════════════════════════
+            { 21.399, 105.237,  8.0,  5.5 },  // TP Việt Trì
+            { 21.400, 105.150,  5.0,  7.5 },  // TX Phú Thọ
+            { 21.350, 105.280,  5.0,  7.5 },  // Lâm Thao (KCN phân bón)
+            { 21.280, 105.200,  5.0, 10.0 },  // Phù Ninh / Sông Lô
+            { 21.000, 105.000,  5.0, 14.0 },  // Thanh Sơn / Yên Lập (núi)
+            { 21.100, 104.950,  4.0, 14.0 },  // Tân Sơn (núi sâu)
 
-            // ══ BẮC GIANG – đô thị + KCN VSIP ════════════════════════════
-            { 21.273, 106.194,  45, 4.0 },  // TP Bắc Giang
-            { 21.280, 106.050,  25, 4.0 },  // TX Việt Yên (KCN VSIP)
-            { 21.380, 106.200,  14, 5.0 },  // Lạng Giang
-            { 21.450, 106.120,  10, 5.0 },  // Tân Yên/Hiệp Hòa (nông thôn)
-            { 21.350, 106.700,   5, 7.0 },  // Sơn Động (núi, rất thưa)
-            { 21.500, 106.400,   4, 7.0 },  // Lục Ngạn/Lục Nam (núi)
+            // ══ TUYÊN QUANG ════════════════════════════════════════════════════
+            { 21.820, 105.218,  7.0,  5.5 },  // TP Tuyên Quang
+            { 21.900, 105.200,  5.0, 10.0 },  // Yên Sơn (bán núi)
+            { 21.700, 105.350,  5.0, 14.0 },  // Chiêm Hóa (núi)
+            { 22.100, 105.100,  4.0, 14.0 },  // Hàm Yên (núi)
+            { 22.350, 105.350,  3.0, 14.0 },  // Nà Hang (núi sâu)
 
-            // ══ PHÚ THỌ – bán núi, công nghiệp hoá chất ══════════════════
-            { 21.399, 105.237,  45, 4.0 },  // TP Việt Trì
-            { 21.400, 105.150,  18, 4.0 },  // TX Phú Thọ
-            { 21.350, 105.280,  14, 4.5 },  // Lâm Thao (KCN phân bón)
-            { 21.280, 105.200,  10, 5.0 },  // Phù Ninh/Sông Lô (nông thôn)
-            { 21.000, 105.000,   5, 8.0 },  // Thanh Sơn/Yên Lập (núi, thưa)
-            { 21.100, 104.950,   3, 8.0 },  // Tân Sơn (núi sâu, rất thưa)
+            // ══ HÒA BÌNH ═══════════════════════════════════════════════════════
+            { 20.817, 105.338,  7.0,  5.5 },  // TP Hòa Bình
+            { 20.980, 105.520,  5.0,  7.5 },  // Lương Sơn (gần HN)
+            { 20.660, 105.550,  5.0, 10.0 },  // Kim Bôi
+            { 20.790, 105.200,  4.0, 14.0 },  // Kỳ Sơn (núi)
+            { 20.900, 105.100,  4.0, 14.0 },  // Đà Bắc (núi sâu)
+            { 20.450, 105.550,  4.0, 14.0 },  // Lạc Sơn (núi)
+            { 20.660, 104.980,  4.0, 14.0 },  // Mai Châu (núi, du lịch)
 
-            // ══ TUYÊN QUANG – bán núi ══════════════════════════════════════
-            { 21.820, 105.218,  30, 4.0 },  // TP Tuyên Quang
-            { 21.900, 105.200,   9, 6.0 },  // Yên Sơn (bán núi)
-            { 21.700, 105.350,   6, 7.0 },  // Chiêm Hóa (núi)
-            { 22.100, 105.100,   5, 8.0 },  // Hàm Yên (núi)
-            { 22.350, 105.350,   3, 9.0 },  // Nà Hang (núi sâu, rất thưa)
+            // ══ QUẢNG NINH ═════════════════════════════════════════════════════
+            { 20.951, 107.080, 10.0,  5.5 },  // TP Hạ Long
+            { 20.940, 106.820,  7.0,  7.5 },  // TX Quảng Yên
+            { 21.010, 106.530,  6.0,  7.5 },  // TX Đông Triều (KCN)
+            { 21.020, 107.300,  6.0,  5.5 },  // TX Cẩm Phả (than)
+            { 21.520, 107.960,  6.0,  7.5 },  // TP Móng Cái (cửa khẩu)
+            { 21.300, 107.390,  4.0, 10.0 },  // Tiên Yên (thưa)
+            { 21.150, 107.180,  4.0, 14.0 },  // Ba Chẽ (núi)
+            { 21.650, 107.700,  4.0, 10.0 },  // Hải Hà / Đầm Hà
+            { 21.700, 107.350,  4.0, 14.0 },  // Bình Liêu (núi)
 
-            // ══ HÒA BÌNH – phần lớn là núi ════════════════════════════════
-            { 20.817, 105.338,  30, 4.0 },  // TP Hòa Bình
-            { 20.980, 105.520,  14, 4.5 },  // Lương Sơn (gần HN, medium)
-            { 20.660, 105.550,   7, 6.0 },  // Kim Bôi (thưa)
-            { 20.790, 105.200,   4, 7.0 },  // Kỳ Sơn (núi)
-            { 20.900, 105.100,   3, 8.0 },  // Đà Bắc (núi sâu, rất thưa)
-            { 20.450, 105.550,   4, 7.0 },  // Lạc Sơn (núi)
-            { 20.660, 104.980,   4, 6.0 },  // Mai Châu (núi, du lịch)
-
-            // ══ QUẢNG NINH – ven biển + núi ═══════════════════════════════
-            { 20.951, 107.080,  70, 3.5 },  // TP Hạ Long
-            { 20.940, 106.820,  28, 4.5 },  // TX Quảng Yên
-            { 21.010, 106.530,  18, 4.5 },  // TX Đông Triều (KCN)
-            { 21.020, 107.300,  28, 4.0 },  // TX Cẩm Phả
-            { 21.520, 107.960,  18, 4.5 },  // TP Móng Cái (cửa khẩu)
-            { 21.300, 107.390,   8, 6.0 },  // Tiên Yên (thưa)
-            { 21.150, 107.180,   5, 6.0 },  // Ba Chẽ (núi, rất thưa)
-            { 21.650, 107.700,   6, 5.0 },  // Hải Hà/Đầm Hà (thưa)
-            { 21.700, 107.350,   4, 7.0 },  // Bình Liêu (núi, rất thưa)
+            // ══ HÀNH LANG GIAO THÔNG (lấp khoảng trống giữa các tỉnh) ══════
+            { 21.015, 106.200, 14.0, 10.0 },  // QL5: HN → Hải Phòng (km 20–50)
+            { 20.910, 106.500, 12.0, 10.0 },  // QL5: HN → Hải Phòng (km 60–90)
+            { 20.720, 105.890, 12.0, 10.0 },  // QL1A: HN → Ninh Bình (trung)
+            { 20.480, 105.920, 10.0, 10.0 },  // QL1A: Hà Nam → Ninh Bình
+            { 20.370, 106.170, 12.0, 10.0 },  // QL10: Ninh Bình → Nam Định → Thái Bình
+            { 20.480, 106.420, 12.0, 10.0 },  // QL10: Nam Định → Thái Bình
+            { 21.100, 105.960, 12.0, 10.0 },  // QL18: HN → Bắc Ninh → Bắc Giang
+            { 21.180, 106.330, 10.0, 10.0 },  // QL18: Bắc Giang → Hải Dương
+            { 20.960, 106.250, 12.0, 10.0 },  // HY – HD trung tâm đồng bằng
+            { 20.730, 106.200, 10.0, 10.0 },  // HY – HD phía nam
+            { 21.380, 105.820, 10.0, 10.0 },  // Vĩnh Phúc → Thái Nguyên
+            { 21.420, 106.000,  9.0, 10.0 },  // Thái Nguyên → Bắc Ninh bắc
+            { 21.280, 106.300,  9.0, 10.0 },  // Bắc Giang tây nam
+            { 21.100, 105.620,  8.0, 10.0 },  // HN → Sơn Tây / Phúc Thọ
         };
 
-        System.out.println("=== Generating REALISTIC Red River Delta coverage ===");
-        System.out.printf("Template: %s | Prefix: %s | Seed: 3000%n", template, prefix);
-        System.out.println("Density rule: urban=dense/small-scatter, mountain=sparse/large-scatter");
+        System.out.println("=== Generating hex-grid cell coverage (Red River Delta + surrounding) ===");
+        System.out.println("Template : " + template);
+        System.out.println("Prefix   : " + prefix);
+        System.out.println("Spacing  : 5.5/7.5/10/14 km (urban/suburban/rural/mountain)");
+        System.out.println("Cell size: 6.6 km × 5.6 km → border overlap ~15% at 5.5 km spacing");
         System.out.println();
 
-        // Count total expected
-        int expected = 0;
-        for (double[] c : clusters) expected += (int) c[2];
-        System.out.printf("Expected total: %d cells%n%n", expected);
+        long t0 = System.currentTimeMillis();
+        for (double[] zone : zones) {
+            int before = allPoints.size();
+            hexGridPoints(zone[0], zone[1], zone[2], zone[3], rng, allPoints);
+            int added = allPoints.size() - before;
 
-        int idx = 1;
-        idx = generateRandomClusters(template, prefix, rng, clusters, idx);
+            // Generate cell files for the newly added points
+            List<double[]> pts = allPoints.subList(allPoints.size() - added, allPoints.size());
+            for (double[] pt : pts) {
+                generateSingleCell(template, prefix, 0, pt[0], pt[1], idx);
+                idx++;
+            }
+            System.out.printf("  Zone [%.3f, %.3f] r=%.0f s=%.1f → +%d cells (total %d)%n",
+                    zone[0], zone[1], zone[2], zone[3], added, idx - 1);
+        }
 
-        int total = idx - 1;
-        System.out.printf("%n=== Done: %d cells generated (RC_1 … RC_%d) ===%n", total, total);
-
-        // ─────────────────────────────────────────────────────────────────
-        // LỚP PHỦ LIỀN MẠCH – Fill gaps giữa các cluster đô thị
-        //
-        // Đặt ở các khoảng trống giữa thành phố, dọc hành lang giao thông
-        // và đồng bằng nông thôn để bản đồ nhìn liền mạch, không bị "bong bóng"
-        //
-        // Scatter 12–16 km → đĩa phủ Ø 24–32 km → overlap cluster kế cận
-        // ─────────────────────────────────────────────────────────────────
-        Random rng2 = new Random(3001);
-        String prefix2 = "RF";
-        double[][] fillClusters = {
-
-            // ══ HÀNH LANG QL5 – Hà Nội → Hải Phòng ══════════════════════
-            { 21.020, 106.100,  25, 13.0 },  // km 20  – Trâu Quỳ/Như Quỳnh
-            { 21.010, 106.290,  25, 13.0 },  // km 40  – Phố Nối/Từ Lâm
-            { 20.960, 106.460,  22, 13.0 },  // km 60  – Sặt/Bình Giang
-            { 20.910, 106.600,  20, 12.0 },  // km 80  – Lai Vu/Kim Thành
-
-            // ══ HÀNH LANG QL1A – Hà Nội → Ninh Bình ══════════════════════
-            { 20.850, 105.880,  20, 12.0 },  // Thường Tín nam
-            { 20.740, 105.890,  20, 12.0 },  // Phú Xuyên trung
-            { 20.640, 105.900,  18, 12.0 },  // Hà Nam bắc (Duy Tiên)
-            { 20.460, 105.930,  18, 12.0 },  // Giữa Hà Nam và Ninh Bình
-            { 20.360, 105.950,  15, 11.0 },  // Ninh Bình bắc
-
-            // ══ HÀNH LANG QL10 – Ninh Bình → Nam Định → Thái Bình ════════
-            { 20.330, 106.090,  18, 11.0 },  // Nam Định tây bắc
-            { 20.390, 106.230,  18, 12.0 },  // Nam Định – Thái Bình ranh giới
-            { 20.430, 106.430,  18, 12.0 },  // Thái Bình tây
-            { 20.500, 106.540,  15, 11.0 },  // Thái Bình trung bắc
-
-            // ══ ĐỒNG BẰNG TRUNG TÂM – lấp vùng trống giữa các tỉnh ════════
-            { 21.100, 105.950,  22, 13.0 },  // Giữa HN và Bắc Ninh
-            { 21.150, 106.130,  20, 13.0 },  // Bắc Ninh bắc / Bắc Giang nam
-            { 20.970, 106.200,  22, 13.0 },  // Hải Dương tây / Hưng Yên đông bắc
-            { 20.800, 106.180,  20, 13.0 },  // Giữa Hưng Yên và Hải Dương
-            { 20.700, 106.250,  18, 12.0 },  // Hưng Yên đông / Hải Dương nam
-            { 20.580, 106.120,  18, 12.0 },  // Giữa Hưng Yên và Hà Nam
-            { 20.560, 106.350,  16, 12.0 },  // Thái Bình tây nam / Hưng Yên đông nam
-            { 20.480, 105.840,  16, 11.0 },  // Hà Nam – Ninh Bình tây
-
-            // ══ VEN BIỂN – dải ven biển đồng bằng ═══════════════════════
-            { 20.220, 106.120,  14, 10.0 },  // Nam Định ven biển
-            { 20.270, 106.320,  13, 10.0 },  // Giao Thủy / Nghĩa Hưng
-            { 20.390, 106.550,  12, 10.0 },  // Thái Bình ven biển bắc
-            { 20.280, 106.480,  12, 10.0 },  // Thái Bình ven biển nam
-
-            // ══ HẢI PHÒNG – HẢI DƯƠNG – QUẢNG NINH kết nối ═════════════
-            { 20.890, 106.780,  18, 11.0 },  // HP – HD connector bắc
-            { 20.830, 106.780,  18, 11.0 },  // HP ngoại vi tây
-            { 21.020, 106.720,  15, 10.0 },  // Thủy Nguyên / Đông Triều kết nối
-            { 21.050, 106.900,  15, 10.0 },  // Đông Triều – Uông Bí
-            { 21.000, 107.170,  15, 10.0 },  // Quảng Ninh ven biển
-
-            // ══ VĨNH PHÚC – THÁI NGUYÊN – BẮC GIANG kết nối ════════════
-            { 21.380, 105.850,  18, 12.0 },  // Giữa Vĩnh Phúc và Thái Nguyên
-            { 21.420, 106.020,  16, 12.0 },  // Thái Nguyên nam / Bắc Ninh bắc
-            { 21.280, 106.320,  15, 11.0 },  // Bắc Giang tây nam
-            { 21.180, 106.450,  15, 11.0 },  // Bắc Giang nam / Hải Dương bắc
-
-            // ══ PHÍA TÂY – Hà Nội → Hòa Bình → Phú Thọ kết nối ══════════
-            { 21.100, 105.620,  15, 11.0 },  // Sơn Tây / Phúc Thọ
-            { 21.200, 105.480,  12, 11.0 },  // Vĩnh Phúc tây / Phú Thọ đông
-            { 20.900, 105.450,  12, 11.0 },  // Hòa Bình đông / HN tây nam
-        };
-
-        System.out.println("\n=== Generating FILL layer for seamless coverage ===");
-        System.out.printf("Template: %s | Prefix: %s | Seed: 3001%n", template, prefix2);
-
-        int expected2 = 0;
-        for (double[] c : fillClusters) expected2 += (int) c[2];
-        System.out.printf("Expected fill cells: %d%n%n", expected2);
-
-        int idx2 = 1;
-        idx2 = generateRandomClusters(template, prefix2, rng2, fillClusters, idx2);
-
-        int total2 = idx2 - 1;
-        System.out.printf("%n=== Done: %d fill cells generated (RF_1 … RF_%d) ===%n", total2, total2);
-        System.out.printf("Grand total: %d + %d = %d cells%n", total, total2, total + total2);
-        System.out.println("Next: run /api/admin/sync-cells");
+        long elapsed = System.currentTimeMillis() - t0;
+        System.out.printf("%n=== Done: %d cells generated (RC_1 … RC_%d) in %.1f s ===%n",
+                idx - 1, idx - 1, elapsed / 1000.0);
+        System.out.println("Next step: /api/admin/sync-cells");
     }
 }
