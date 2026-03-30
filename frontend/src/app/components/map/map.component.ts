@@ -9,7 +9,7 @@ import { LayerService } from '../../services/layer.service';
 import { RasterCoverage } from '../../models/raster-coverage.model';
 import { environment } from '../../../environments/environment';
 
-export type DisplayMode = 'coverage' | 'signal-avg' | 'signal-max';
+export type DisplayMode = 'coverage' | 'signal-max';
 
 @Component({
   selector: 'app-map',
@@ -220,10 +220,9 @@ export class MapComponent implements OnInit, OnDestroy {
   }
 
   private buildHexFillPaint(): object {
-    if (this.displayMode === 'signal-avg' || this.displayMode === 'signal-max') {
-      const prop = this.displayMode === 'signal-avg' ? 'avg_signal' : 'max_signal';
+    if (this.displayMode === 'signal-max') {
       return {
-        'fill-color': this.signalColorExpr(prop),
+        'fill-color': this.signalColorExpr('max_signal'),
         'fill-opacity': [
           'case',
           ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], 0.75,
@@ -274,7 +273,7 @@ export class MapComponent implements OnInit, OnDestroy {
   }
 
   private buildHexStrokePaint(): object {
-    if (this.displayMode === 'signal-avg' || this.displayMode === 'signal-max') {
+    if (this.displayMode === 'signal-max') {
       return {
         'line-color': [
           'case',
@@ -329,9 +328,7 @@ export class MapComponent implements OnInit, OnDestroy {
       if (!features?.length) return;
       const p = features[0].properties;
 
-      const modeLabel = this.displayMode === 'signal-avg' ? 'Avg Signal'
-                      : this.displayMode === 'signal-max' ? 'Max Signal'
-                      : 'Coverage Density';
+      const modeLabel = this.displayMode === 'signal-max' ? 'Max Signal' : 'Coverage Density';
       let content = `<strong>${modeLabel}</strong><br>
         Visible cells: <b>${p?.['count']}</b><br>
         Total cells: <b>${p?.['total']}</b>`;
@@ -341,10 +338,6 @@ export class MapComponent implements OnInit, OnDestroy {
         const max = p?.['max_signal'];
         if (avg != null) content += `<br>Avg signal: <b>${(avg as number).toFixed(1)} dBm</b>`;
         if (max != null) content += `<br>Max signal: <b>${(max as number).toFixed(1)} dBm</b>`;
-        if (this.displayMode === 'signal-avg' && avg != null)
-          content += ` <em>(displaying avg)</em>`;
-        if (this.displayMode === 'signal-max' && max != null)
-          content += ` <em>(displaying max)</em>`;
       }
 
       popup
@@ -422,13 +415,12 @@ export class MapComponent implements OnInit, OnDestroy {
   private baseTileUrl(): string {
     const api = environment.apiUrl;
     const v = this.tileVersion;
-    if (this.displayMode === 'signal-avg') return `${api}/wms-tile-signal-xyz?mode=avg&v=${v}&z={z}&x={x}&y={y}`;
-    if (this.displayMode === 'signal-max') return `${api}/wms-tile-signal-xyz?mode=max&v=${v}&z={z}&x={x}&y={y}`;
+    if (this.displayMode === 'signal-max') return `${api}/wms-tile-signal-xyz?v=${v}&z={z}&x={x}&y={y}`;
     return `${api}/wms-tile-xyz?v=${v}&z={z}&x={x}&y={y}`;
   }
 
   private isSignalMode(): boolean {
-    return this.displayMode === 'signal-avg' || this.displayMode === 'signal-max';
+    return this.displayMode === 'signal-max';
   }
 
   // --- Mode toggle button ----------------------------------------------------
@@ -439,9 +431,8 @@ export class MapComponent implements OnInit, OnDestroy {
       onAdd(): HTMLElement {
         const div = L.DomUtil.create('div', 'mode-toggle');
         div.innerHTML = `
-          <button class="mode-btn active" data-mode="coverage"    title="Coverage density — số cell phủ tại mỗi hex">Coverage</button>
-          <button class="mode-btn"        data-mode="signal-avg"  title="Avg Signal — cường độ sóng trung bình (chiến lược B)">Avg Signal</button>
-          <button class="mode-btn"        data-mode="signal-max"  title="Max Signal — cường độ sóng tốt nhất (chiến lược A)">Max Signal</button>
+          <button class="mode-btn active" data-mode="coverage"   title="Coverage density — số cell phủ tại mỗi hex">Coverage</button>
+          <button class="mode-btn"        data-mode="signal-max" title="Max Signal — cường độ sóng tốt nhất tại mỗi điểm">Max Signal</button>
         `;
 
         div.querySelectorAll('.mode-btn').forEach((btn) => {
@@ -487,10 +478,8 @@ export class MapComponent implements OnInit, OnDestroy {
   private buildLegendElement(): HTMLElement {
     const div = L.DomUtil.create('div', 'hex-legend');
 
-    if (this.displayMode === 'signal-avg' || this.displayMode === 'signal-max') {
-      const title = this.displayMode === 'signal-avg'
-        ? 'Avg Signal (B)'
-        : 'Max Signal (A)';
+    if (this.displayMode === 'signal-max') {
+      const title = 'Max Signal';
       const grades: { label: string; color: string; dashed?: boolean }[] = [
         { label: '≥ -80 dBm — Tuyệt vời',   color: 'rgba(253,231, 37, 0.75)' },
         { label: '-85 → -80 — Rất tốt',    color: 'rgba(210,206, 62, 0.75)' },

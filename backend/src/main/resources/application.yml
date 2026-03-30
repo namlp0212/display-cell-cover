@@ -1,0 +1,42 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:cellcover}?sslmode=disable
+    username: ${DB_USER:cellcover}
+    password: ${DB_PASSWORD:cellcover}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.spatial.dialect.postgis.PostgisPG10Dialect
+  flyway:
+    enabled: true
+
+server:
+  port: ${SERVER_PORT:8080}
+
+logging:
+  level:
+    org.springframework.web.servlet.DispatcherServlet: DEBUG
+
+geoserver:
+  url: ${GEOSERVER_URL:http://localhost:8081/geoserver}
+  overlap-groups: 8
+
+cellcover:
+  raster-dir: ${RASTER_DIR:/Users/lenam/Data/cell-data}
+  cog-dir: ${COG_DIR:data/cog}
+  parallel-threads: ${IMPORT_THREADS:4}
+  geoserver:
+    url: ${GEOSERVER_URL:http://localhost:8081/geoserver}
+    username: ${GEOSERVER_USER:admin}
+    password: ${GEOSERVER_PASSWORD:geoserver}
+    workspace: cellcover
+    overlap-groups: 8
+  minio:
+    endpoint:   ${MINIO_ENDPOINT:http://localhost:9000}
+    access-key: ${MINIO_ACCESS_KEY:minioadmin}
+    secret-key: ${MINIO_SECRET_KEY:minioadmin}
+    bucket:     ${MINIO_BUCKET:cellcover}
