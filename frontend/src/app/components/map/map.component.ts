@@ -35,6 +35,9 @@ export class MapComponent implements OnInit, OnDestroy {
   /** Current display mode */
   displayMode: DisplayMode = 'coverage';
 
+  /** WMS raster layer opacity (0–1). Default 0.65, adjustable via slider. */
+  wmsOpacity = 0.65;
+
   /** Reference to the legend control so we can remove/re-add it on mode change */
   private legendControl: L.Control | null = null;
 
@@ -173,7 +176,7 @@ export class MapComponent implements OnInit, OnDestroy {
             source: 'wms-composite',
             minzoom: MapComponent.ZOOM_WMS,
             paint: {
-              'raster-opacity': 0.65,
+              'raster-opacity': this.wmsOpacity,
               'raster-fade-duration': 0
             }
           }
@@ -202,31 +205,35 @@ export class MapComponent implements OnInit, OnDestroy {
 
   // --- Hex layer paint expressions -------------------------------------------
 
-  /** MapLibre expression for signal color ramp (dBm scale, -140 to -73). */
+  /**
+   * MapLibre step expression matching the cellcover-continuous SLD color stops.
+   * Thresholds aligned with SLD: -150, -130, -110, -95, -85, -75, -65.
+   */
   private signalColorExpr(prop: 'avg_signal' | 'max_signal'): unknown[] {
     return [
       'case',
       ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], '#FF0000',
       ['!', ['has', prop]], '#1F4E79',
-      ['<', ['get', prop], -130], '#00204D',
-      ['<', ['get', prop], -120], '#00336F',
+      ['<', ['get', prop], -150], '#00204D',
+      ['<', ['get', prop], -130], '#00336F',
       ['<', ['get', prop], -110], '#1F4E79',
-      ['<', ['get', prop], -100], '#2C788E',
-      ['<', ['get', prop], -90],  '#5FA060',
-      ['<', ['get', prop], -85],  '#9DBA46',
-      ['<', ['get', prop], -80],  '#D2CE3E',
+      ['<', ['get', prop], -95],  '#2C788E',
+      ['<', ['get', prop], -85],  '#5FA060',
+      ['<', ['get', prop], -75],  '#9DBA46',
+      ['<', ['get', prop], -65],  '#D2CE3E',
       '#FDE725'
     ];
   }
 
   private buildHexFillPaint(): object {
+    const o = this.wmsOpacity;
     if (this.displayMode === 'signal-max') {
       return {
         'fill-color': this.signalColorExpr('max_signal'),
         'fill-opacity': [
           'case',
-          ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], 0.75,
-          ['>', ['get', 'count'], 0], 0.70,
+          ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], 0.75 * o,
+          ['>', ['get', 'count'], 0], 0.70 * o,
           0
         ],
         'fill-outline-color': [
@@ -251,12 +258,12 @@ export class MapComponent implements OnInit, OnDestroy {
       ],
       'fill-opacity': [
         'case',
-        ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], 0.75,
-        ['>=', ['get', 'count'], 100], 0.85,
-        ['>=', ['get', 'count'], 40],  0.75,
-        ['>=', ['get', 'count'], 15],  0.65,
-        ['>=', ['get', 'count'], 5],   0.55,
-        ['>', ['get', 'count'], 0],    0.45,
+        ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], 0.75 * o,
+        ['>=', ['get', 'count'], 100], 0.85 * o,
+        ['>=', ['get', 'count'], 40],  0.75 * o,
+        ['>=', ['get', 'count'], 15],  0.65 * o,
+        ['>=', ['get', 'count'], 5],   0.55 * o,
+        ['>', ['get', 'count'], 0],    0.45 * o,
         0
       ],
       'fill-outline-color': [
@@ -273,6 +280,7 @@ export class MapComponent implements OnInit, OnDestroy {
   }
 
   private buildHexStrokePaint(): object {
+    const o = this.wmsOpacity;
     if (this.displayMode === 'signal-max') {
       return {
         'line-color': [
@@ -282,7 +290,7 @@ export class MapComponent implements OnInit, OnDestroy {
           'transparent'
         ],
         'line-width': 0.5,
-        'line-opacity': 1.0
+        'line-opacity': o
       };
     }
     return {
@@ -297,7 +305,7 @@ export class MapComponent implements OnInit, OnDestroy {
         'transparent'
       ],
       'line-width': 0.5,
-      'line-opacity': 1.0
+      'line-opacity': o
     };
   }
 
@@ -431,8 +439,16 @@ export class MapComponent implements OnInit, OnDestroy {
       onAdd(): HTMLElement {
         const div = L.DomUtil.create('div', 'mode-toggle');
         div.innerHTML = `
-          <button class="mode-btn active" data-mode="coverage"   title="Coverage density — số cell phủ tại mỗi hex">Coverage</button>
-          <button class="mode-btn"        data-mode="signal-max" title="Max Signal — cường độ sóng tốt nhất tại mỗi điểm">Max Signal</button>
+          <div class="mode-btn-row">
+            <button class="mode-btn active" data-mode="coverage"   title="Coverage density — số cell phủ tại mỗi hex">Coverage</button>
+            <button class="mode-btn"        data-mode="signal-max" title="Max Signal — cường độ sóng tốt nhất tại mỗi điểm">Max Signal</button>
+          </div>
+          <div class="opacity-row">
+            <span class="opacity-label">Độ mờ</span>
+            <input class="opacity-slider" type="range" min="0" max="1" step="0.05"
+                   value="${self.wmsOpacity}">
+            <span class="opacity-value">${Math.round(self.wmsOpacity * 100)}%</span>
+          </div>
         `;
 
         div.querySelectorAll('.mode-btn').forEach((btn) => {
@@ -443,6 +459,20 @@ export class MapComponent implements OnInit, OnDestroy {
             div.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
           });
+        });
+
+        const slider = div.querySelector('.opacity-slider') as HTMLInputElement;
+        const valueLabel = div.querySelector('.opacity-value') as HTMLElement;
+        L.DomEvent.on(slider, 'input', () => {
+          const opacity = parseFloat(slider.value);
+          self.wmsOpacity = opacity;
+          valueLabel.textContent = `${Math.round(opacity * 100)}%`;
+          const glMap = self.glLayer?.getMaplibreMap();
+          if (!glMap) return;
+          // Raster layer (zoom >= 13)
+          glMap.setPaintProperty('wms-composite-raster', 'raster-opacity', opacity);
+          // Vector hex layers (zoom < 13)
+          self.updateHexLayerPaint(glMap);
         });
 
         L.DomEvent.disableClickPropagation(div);
@@ -481,14 +511,14 @@ export class MapComponent implements OnInit, OnDestroy {
     if (this.displayMode === 'signal-max') {
       const title = 'Max Signal';
       const grades: { label: string; color: string; dashed?: boolean }[] = [
-        { label: '≥ -80 dBm — Tuyệt vời',   color: 'rgba(253,231, 37, 0.75)' },
-        { label: '-85 → -80 — Rất tốt',    color: 'rgba(210,206, 62, 0.75)' },
-        { label: '-90 → -85 — Tốt',        color: 'rgba(159,186, 70, 0.75)' },
-        { label: '-100 → -90 — Khá',       color: 'rgba( 95,160, 96, 0.75)' },
-        { label: '-110 → -100 — Trung bình',color:'rgba( 44,120,142, 0.75)' },
-        { label: '-120 → -110 — Yếu',      color: 'rgba( 31, 78,121, 0.75)' },
-        { label: '-130 → -120 — Rất yếu',  color: 'rgba(  0, 51,111, 0.75)' },
-        { label: '< -130 — Cực yếu',       color: 'rgba(  0, 32, 77, 0.75)' },
+        { label: '≥ -65 dBm — Tuyệt vời',    color: 'rgba(253,231, 37, 0.75)' },
+        { label: '-75 → -65 — Rất tốt',    color: 'rgba(210,206, 62, 0.75)' },
+        { label: '-85 → -75 — Tốt',        color: 'rgba(157,186, 70, 0.75)' },
+        { label: '-95 → -85 — Khá',        color: 'rgba( 95,160, 96, 0.75)' },
+        { label: '-110 → -95 — Trung bình', color:'rgba( 44,120,142, 0.75)' },
+        { label: '-130 → -110 — Yếu',      color: 'rgba( 31, 78,121, 0.75)' },
+        { label: '-150 → -130 — Rất yếu',  color: 'rgba(  0, 51,111, 0.75)' },
+        { label: '< -150 — Cực yếu',       color: 'rgba(  0, 32, 77, 0.75)' },
         { label: 'Không có dữ liệu',        color: 'rgba( 31, 78,121, 0.75)' },
         { label: 'Cell tắt (OFF)',          color: 'rgba(255,  0,  0, 0.75)', dashed: true },
       ];

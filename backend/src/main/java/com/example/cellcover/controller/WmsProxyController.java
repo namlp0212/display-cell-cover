@@ -1,6 +1,7 @@
 package com.example.cellcover.controller;
 
 import com.example.cellcover.repository.RasterCoverageRepository;
+import com.example.cellcover.service.PixelMaxSignalService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.CacheControl;
@@ -47,13 +48,13 @@ public class WmsProxyController {
     @Value("${geoserver.overlap-groups}")
     private int overlapGroups;
 
-    @Value("${tile-server.url:http://localhost:8082}")
-    private String tileServerUrl;
-
-    private static final int PIXEL_MAX_ZOOM = 14; // zoom >= this uses per-pixel MAX tile server
+    private static final int PIXEL_MAX_ZOOM = 14;
 
     @Autowired
     private RasterCoverageRepository rasterCoverageRepository;
+
+    @Autowired
+    private PixelMaxSignalService pixelMaxSignalService;
 
     private final HttpClient httpClient = HttpClient.newHttpClient();
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -105,14 +106,7 @@ public class WmsProxyController {
             @PathVariable int z, @PathVariable int x, @PathVariable int y
     ) throws Exception {
         if (z >= PIXEL_MAX_ZOOM) {
-            // True per-pixel MAX via Python tile server
-            HttpResponse<byte[]> resp = httpClient.send(
-                    HttpRequest.newBuilder()
-                            .uri(URI.create(tileServerUrl + "/signal-tile/" + z + "/" + x + "/" + y))
-                            .GET().build(),
-                    HttpResponse.BodyHandlers.ofByteArray());
-            if (resp.statusCode() != 200) return ResponseEntity.status(502).build();
-            return noStorePng().body(resp.body());
+            return noStorePng().body(pixelMaxSignalService.renderTile(z, x, y));
         }
         return proxyWmsTileSignal(tileToBbox(x, y, z));
     }
@@ -129,13 +123,7 @@ public class WmsProxyController {
             @RequestParam int z, @RequestParam int x, @RequestParam int y
     ) throws Exception {
         if (z >= PIXEL_MAX_ZOOM) {
-            HttpResponse<byte[]> resp = httpClient.send(
-                    HttpRequest.newBuilder()
-                            .uri(URI.create(tileServerUrl + "/signal-tile/" + z + "/" + x + "/" + y))
-                            .GET().build(),
-                    HttpResponse.BodyHandlers.ofByteArray());
-            if (resp.statusCode() != 200) return ResponseEntity.status(502).build();
-            return noStorePng().body(resp.body());
+            return noStorePng().body(pixelMaxSignalService.renderTile(z, x, y));
         }
         return proxyWmsTileSignal(tileToBbox(x, y, z));
     }

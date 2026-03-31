@@ -48,9 +48,12 @@ public class BilToCogConverter {
     private static final Logger log = LoggerFactory.getLogger(BilToCogConverter.class);
 
     private final MinioStorageService minioStorage;
+    private final PixelMaxSignalService pixelMaxSignalService;
 
-    public BilToCogConverter(MinioStorageService minioStorage) {
+    public BilToCogConverter(MinioStorageService minioStorage,
+                             PixelMaxSignalService pixelMaxSignalService) {
         this.minioStorage = minioStorage;
+        this.pixelMaxSignalService = pixelMaxSignalService;
     }
 
     static {
@@ -84,6 +87,8 @@ public class BilToCogConverter {
             Path contOut = cogDir.resolve("continuous").resolve(cellId + ".tif");
             log.info("Converting {} → continuous/{}.tif", cellId, cellId);
             convertFileContinuous(bil, hdr, epsgCode, contOut);
+            // Invalidate cached geo-transform so the new file is re-read on next tile request
+            pixelMaxSignalService.invalidateMeta(cellId);
         }
     }
 

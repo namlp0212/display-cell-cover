@@ -43,6 +43,20 @@ public interface RasterCoverageRepository extends JpaRepository<RasterCoverage, 
             @Param("minx") double minx, @Param("miny") double miny,
             @Param("maxx") double maxx, @Param("maxy") double maxy);
 
+    /** Cell IDs of visible, non-SVR cells intersecting the given EPSG:4326 envelope, ordered by avg_signal ASC. */
+    @Query(value = "SELECT cell_id FROM raster_coverages WHERE is_visible = true AND is_svr = false AND ST_Intersects(bbox, ST_MakeEnvelope(:minx, :miny, :maxx, :maxy, 4326)) ORDER BY avg_signal ASC NULLS FIRST",
+           nativeQuery = true)
+    List<String> findVisibleCellIdsInBbox(
+            @Param("minx") double minx, @Param("miny") double miny,
+            @Param("maxx") double maxx, @Param("maxy") double maxy);
+
+    /** Cell IDs of hidden (off), non-SVR cells intersecting the given EPSG:4326 envelope. */
+    @Query(value = "SELECT cell_id FROM raster_coverages WHERE is_visible = false AND is_svr = false AND ST_Intersects(bbox, ST_MakeEnvelope(:minx, :miny, :maxx, :maxy, 4326))",
+           nativeQuery = true)
+    List<String> findHiddenCellIdsInBbox(
+            @Param("minx") double minx, @Param("miny") double miny,
+            @Param("maxx") double maxx, @Param("maxy") double maxy);
+
     @Modifying
     @Query("DELETE FROM RasterCoverage r WHERE r.cellId IN :cellIds")
     int deleteByCellIds(@Param("cellIds") List<String> cellIds);
