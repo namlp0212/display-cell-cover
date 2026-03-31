@@ -47,6 +47,11 @@ public class WmsProxyController {
     @Value("${geoserver.overlap-groups}")
     private int overlapGroups;
 
+    @Value("${tile-server.url:http://localhost:8082}")
+    private String tileServerUrl;
+
+    private static final int PIXEL_MAX_ZOOM = 14; // zoom >= this uses per-pixel MAX tile server
+
     @Autowired
     private RasterCoverageRepository rasterCoverageRepository;
 
@@ -99,6 +104,16 @@ public class WmsProxyController {
     public ResponseEntity<byte[]> proxyWmsTileSignalXYZ(
             @PathVariable int z, @PathVariable int x, @PathVariable int y
     ) throws Exception {
+        if (z >= PIXEL_MAX_ZOOM) {
+            // True per-pixel MAX via Python tile server
+            HttpResponse<byte[]> resp = httpClient.send(
+                    HttpRequest.newBuilder()
+                            .uri(URI.create(tileServerUrl + "/signal-tile/" + z + "/" + x + "/" + y))
+                            .GET().build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            if (resp.statusCode() != 200) return ResponseEntity.status(502).build();
+            return noStorePng().body(resp.body());
+        }
         return proxyWmsTileSignal(tileToBbox(x, y, z));
     }
 
@@ -113,6 +128,15 @@ public class WmsProxyController {
     public ResponseEntity<byte[]> proxyWmsTileSignalQP(
             @RequestParam int z, @RequestParam int x, @RequestParam int y
     ) throws Exception {
+        if (z >= PIXEL_MAX_ZOOM) {
+            HttpResponse<byte[]> resp = httpClient.send(
+                    HttpRequest.newBuilder()
+                            .uri(URI.create(tileServerUrl + "/signal-tile/" + z + "/" + x + "/" + y))
+                            .GET().build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            if (resp.statusCode() != 200) return ResponseEntity.status(502).build();
+            return noStorePng().body(resp.body());
+        }
         return proxyWmsTileSignal(tileToBbox(x, y, z));
     }
 
