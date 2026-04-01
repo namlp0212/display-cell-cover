@@ -47,12 +47,9 @@ public class BilToCogConverter {
 
     private static final Logger log = LoggerFactory.getLogger(BilToCogConverter.class);
 
-    private final MinioStorageService minioStorage;
     private final PixelMaxSignalService pixelMaxSignalService;
 
-    public BilToCogConverter(MinioStorageService minioStorage,
-                             PixelMaxSignalService pixelMaxSignalService) {
-        this.minioStorage = minioStorage;
+    public BilToCogConverter(PixelMaxSignalService pixelMaxSignalService) {
         this.pixelMaxSignalService = pixelMaxSignalService;
     }
 
@@ -71,20 +68,19 @@ public class BilToCogConverter {
         Path bil = cellDir.resolve(cellId + ".bil");
         if (!Files.exists(bil)) return;
 
-        String binaryKey = MinioStorageService.binaryKey(cellId);
-        if (minioStorage.exists(binaryKey)) {
-            log.info("COG already in MinIO, skipping binary: {}", binaryKey);
+        Path binOut  = cogDir.resolve("binary").resolve(cellId + "_svr.tif");
+        Path contOut = cogDir.resolve("continuous").resolve(cellId + ".tif");
+
+        if (Files.exists(binOut)) {
+            log.info("Binary COG already exists, skipping: {}", binOut.getFileName());
         } else {
-            Path binOut = cogDir.resolve("binary").resolve(cellId + "_svr.tif");
             log.info("Converting {} → binary/{}_svr.tif", cellId, cellId);
             convertFile(bil, hdr, epsgCode, binOut);
         }
 
-        String continuousKey = MinioStorageService.continuousKey(cellId);
-        if (minioStorage.exists(continuousKey)) {
-            log.info("COG already in MinIO, skipping continuous: {}", continuousKey);
+        if (Files.exists(contOut)) {
+            log.info("Continuous COG already exists, skipping: {}", contOut.getFileName());
         } else {
-            Path contOut = cogDir.resolve("continuous").resolve(cellId + ".tif");
             log.info("Converting {} → continuous/{}.tif", cellId, cellId);
             convertFileContinuous(bil, hdr, epsgCode, contOut);
             // Invalidate cached geo-transform so the new file is re-read on next tile request
@@ -195,6 +191,7 @@ public class BilToCogConverter {
         ProcessBuilder pb = new ProcessBuilder(
                 "gdalwarp",
                 "-t_srs", "EPSG:4326",
+                "-tr", "0.000036", "0.000036",   // ~4 m/pixel at VN latitude
                 "-r", "bilinear",
                 "-ot", "Float32",
                 "-dstnodata", String.valueOf(NODATA),
@@ -222,6 +219,7 @@ public class BilToCogConverter {
                 "gdalwarp",
                 "-s_srs", srcEpsg,
                 "-t_srs", "EPSG:4326",
+                "-tr", "0.000036", "0.000036",   // ~4 m/pixel at VN latitude
                 "-r", "bilinear",
                 "-srcnodata", nodataStr,
                 "-dstnodata", nodataStr,

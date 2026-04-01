@@ -26,3 +26,4 @@ data/rasters/
 data/cog/
 data/geoserver/
 test_data/
+backend/data/cog/

@@ -61,7 +61,7 @@ public class PixelMaxSignalService {
     private static final int     STOP_A = 179;
     private static final int     OFF_CELL_ARGB = (STOP_A << 24) | 0xFF0000;
 
-    @Value("${cellcover.local-cont-dir:/Users/lenam/tools/geoserver/data_dir/data/cellcover/continuous}")
+    @Value("${cellcover.local-cont-dir:data/cog/continuous}")
     private String localContDir;
 
     @Autowired
@@ -178,8 +178,6 @@ public class PixelMaxSignalService {
         int srcX1 = (int) Math.ceil ((lonMax - meta.ulLon()) / meta.xRes());
         int srcY1 = (int) Math.ceil ((meta.ulLat() - latMin) / meta.yRes());
 
-        // Clamp to file extent (TIFFImageReader does NOT do boundless read)
-        int fileW = (int) Math.round((meta.xRes() > 0) ? Double.MAX_VALUE : 0); // will derive below
         // Clamp to non-negative, let reader handle out-of-range gracefully
         srcX0 = Math.max(0, srcX0);
         srcY0 = Math.max(0, srcY0);

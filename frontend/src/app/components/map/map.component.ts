@@ -363,7 +363,7 @@ export class MapComponent implements OnInit, OnDestroy {
       const badge = document.getElementById('zoom-badge');
       if (!badge) return;
       if (z < MapComponent.ZOOM_WMS) {
-        const res = z <= 7 ? 'Res6' : z <= 8 ? 'Res7' : z <= 9 ? 'Res8' : z <= 10 ? 'Res9' : 'Res10';
+        const res = z <= 7 ? 'Res6' : z <= 8 ? 'Res7' : z <= 10 ? 'Res8' : 'Res9';
         badge.textContent = `Z${z.toFixed(1)} — Hex heatmap (${res})`;
         badge.className = 'zoom-badge hex';
       } else {

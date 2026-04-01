@@ -39,13 +39,10 @@ public class GeoServerService {
 
     private final RestTemplate        restTemplate;
     private final CellImportProperties properties;
-    private final MinioStorageService  minioStorage;
 
-    public GeoServerService(RestTemplate restTemplate, CellImportProperties properties,
-                             MinioStorageService minioStorage) {
+    public GeoServerService(RestTemplate restTemplate, CellImportProperties properties) {
         this.restTemplate = restTemplate;
         this.properties   = properties;
-        this.minioStorage = minioStorage;
     }
 
     // -------------------------------------------------------------------------
@@ -78,62 +75,28 @@ public class GeoServerService {
     }
 
     /**
-     * Registers a COG pair into GeoServer and stores the TIF files in MinIO.
-     *
-     * Flow for each store type (binary / continuous):
-     *   1. If the local TIF exists (fresh convert): register with GeoServer using
-     *      the local file (so GeoServer can extract the geometry), then upload to
-     *      MinIO and delete the local file.
-     *   2. If the local TIF is gone but the object is already in MinIO (re-sync
-     *      after restart): download to a temp file, register with GeoServer, then
-     *      delete the temp file (object stays in MinIO).
-     *   3. In both cases, update the shapefile location to the /vsis3/ path so
-     *      GeoServer reads future tiles directly from MinIO via GDAL.
+     * Registers a COG pair (binary + continuous) into GeoServer's ImageMosaic shapefile index.
+     * COG files are kept as local files — no MinIO upload.
      */
     public void registerGranule(Path cogDir, String cellId, int ovlpGroup, Double avgSignal) {
-        registerStoreGranule(cogDir, "binary",     cellId + "_svr.tif",
-                             MinioStorageService.binaryKey(cellId),     cellId, ovlpGroup, null);
-        registerStoreGranule(cogDir, "continuous", cellId + ".tif",
-                             MinioStorageService.continuousKey(cellId), cellId, ovlpGroup, avgSignal);
+        registerStoreGranule(cogDir, "binary",     cellId + "_svr.tif", cellId, ovlpGroup, null);
+        registerStoreGranule(cogDir, "continuous", cellId + ".tif",      cellId, ovlpGroup, avgSignal);
     }
 
     private void registerStoreGranule(Path cogDir, String storeType, String fileName,
-                                       String minioKey, String cellId, int ovlpGroup,
-                                       Double avgSignal) {
-        Path localTif  = cogDir.resolve(storeType).resolve(fileName);
-        Path workingTif;
-        boolean isTempFile = false;
-
-        if (Files.exists(localTif)) {
-            workingTif = localTif;
-        } else if (minioStorage.exists(minioKey)) {
-            // Re-sync path: download from MinIO to a temp file for GeoServer registration
-            try {
-                workingTif = Files.createTempFile("cog_reg_", ".tif");
-                minioStorage.download(minioKey, workingTif);
-                isTempFile = true;
-            } catch (Exception e) {
-                log.warn("Cannot obtain {} for GeoServer registration: {}", minioKey, e.getMessage());
-                return;
-            }
-        } else {
-            return;  // nothing to register
+                                       String cellId, int ovlpGroup, Double avgSignal) {
+        Path localTif = cogDir.resolve(storeType).resolve(fileName);
+        if (!Files.exists(localTif)) {
+            log.warn("COG file not found, skipping GeoServer registration: {}", localTif);
+            return;
         }
-
         try {
-            addGranuleToStore(workingTif, storeType);
-            if (!isTempFile) {
-                // Fresh convert: upload the local TIF to MinIO then delete it
-                minioStorage.upload(workingTif, minioKey);
-                deleteFile(workingTif);
-            }
+            addGranuleToStore(localTif, storeType);
             updateShapefileEntry(cogDir.resolve(storeType), storeType,
                                  fileName, cellId, ovlpGroup,
-                                 minioStorage.vsiPath(minioKey), avgSignal);
+                                 localTif.toAbsolutePath().toString(), avgSignal);
         } catch (Exception e) {
             log.warn("Failed to register granule {} in store {}: {}", fileName, storeType, e.getMessage());
-        } finally {
-            if (isTempFile) deleteFile(workingTif);
         }
     }
 
@@ -174,12 +137,12 @@ public class GeoServerService {
         log.info("Recreated coverage: {} with style {}", storeType, styleName);
     }
 
-    /** Removes a cell's granules from both ImageMosaic stores and MinIO. */
+    /** Removes a cell's granules from both ImageMosaic stores and deletes local COG files. */
     public void removeGranule(Path cogDir, String cellId) {
         deleteGranuleFromStore("binary",     cellId + "_svr.tif");
         deleteGranuleFromStore("continuous", cellId + ".tif");
-        minioStorage.delete(MinioStorageService.binaryKey(cellId));
-        minioStorage.delete(MinioStorageService.continuousKey(cellId));
+        deleteFile(cogDir.resolve("binary").resolve(cellId + "_svr.tif"));
+        deleteFile(cogDir.resolve("continuous").resolve(cellId + ".tif"));
     }
 
     /** Reloads GeoServer configuration (clears in-memory caches). */
@@ -271,7 +234,7 @@ public class GeoServerService {
     }
 
     private void addGranuleToStore(Path cogFile, String storeType) {
-        String fileUrl = cogFile.toAbsolutePath().toUri().toString();
+        String fileUrl = cogFile.toAbsolutePath().toString();  // plain path, not file:// URI
         try {
             HttpHeaders headers = authHeaders();
             headers.setContentType(MediaType.TEXT_PLAIN);

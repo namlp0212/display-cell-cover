@@ -48,7 +48,7 @@ public class WmsProxyController {
     @Value("${geoserver.overlap-groups}")
     private int overlapGroups;
 
-    private static final int PIXEL_MAX_ZOOM = 14;
+    private static final int PIXEL_MAX_ZOOM = 13;
 
     @Autowired
     private RasterCoverageRepository rasterCoverageRepository;
