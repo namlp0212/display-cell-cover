@@ -27,8 +27,8 @@ geoserver:
 
 cellcover:
   raster-dir: ${RASTER_DIR:/Users/lenam/Data/cell-data-rest}
-  cog-dir: ${COG_DIR:data/cog}
-  local-cont-dir: ${COG_DIR:data/cog}/continuous
+  cog-dir: ${COG_DIR:/Users/lenam/tools/geoserver/data_dir/data/cellcover}
+  local-cont-dir: ${LOCAL_CONT_DIR:/Users/lenam/tools/geoserver/data_dir/data/cellcover/continuous}
   parallel-threads: ${IMPORT_THREADS:4}
   geoserver:
     url: ${GEOSERVER_URL:http://localhost:8081/geoserver}

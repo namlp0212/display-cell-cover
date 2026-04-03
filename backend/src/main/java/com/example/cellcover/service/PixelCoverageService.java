@@ -27,26 +27,20 @@ import java.util.List;
 import java.util.concurrent.*;
 
 /**
- * Renders per-pixel MAX signal tiles directly from continuous COG files stored in MinIO.
+ * Renders per-pixel coverage density tiles directly from binary COG files stored in MinIO.
  *
- * Uses COG range reads ({@link DefaultCogImageInputStream} + {@link MinioRangeReader}) to
+ * <p>Uses COG range reads ({@link DefaultCogImageInputStream} + {@link MinioRangeReader}) to
  * fetch only the header (once, then cached) and the exact internal tile byte ranges that
- * overlap the requested viewport — instead of downloading the full file.
+ * overlap the requested viewport.
  *
- * Overview selection:
- *   The overview level is chosen so that the COG resolution matches the map tile resolution
- *   at the requested zoom.  This means zoom-13 reads the 14.4 m overview rather than the
- *   full 8 m data, reducing data transferred by ~4×.
- *
- * Performance strategy:
- *   - TiffMeta (geo-transform) is parsed once per cell via GeoTiffReader (downloads full COG
- *     to a temp file once, then caches).  Subsequent reads use COG range reads only.
- *   - Cells in each tile are read in parallel using a dedicated thread pool.
+ * <p>Rendering:
+ *   Visible cells → density color ramp (1 cell = very-weak blue → 5+ cells = strong green)
+ *   Hidden cells  → red (#FF0000) where no visible cell overlaps
  */
 @Service
-public class PixelMaxSignalService {
+public class PixelCoverageService {
 
-    private static final Logger log = LoggerFactory.getLogger(PixelMaxSignalService.class);
+    private static final Logger log = LoggerFactory.getLogger(PixelCoverageService.class);
 
     static {
         System.setProperty("org.geotools.referencing.forceXY", "true");
@@ -55,10 +49,7 @@ public class PixelMaxSignalService {
     private static final int IO_THREADS = Math.min(64, Runtime.getRuntime().availableProcessors() * 8);
     private static final ExecutorService IO_POOL = Executors.newFixedThreadPool(IO_THREADS);
 
-    /**
-     * Cached SPI for CogImageReader — avoids the synchronized IIORegistry scan that
-     * {@link ImageIO#getImageReaders} performs on every call.  Populated once at startup.
-     */
+    /** Cached SPI — avoids synchronized IIORegistry scan on every readCogWindow call. */
     private static final ImageReaderSpi COG_READER_SPI = findCogReaderSpi();
 
     private static ImageReaderSpi findCogReaderSpi() {
@@ -72,17 +63,14 @@ public class PixelMaxSignalService {
         return null;
     }
 
-    private static final int   TILE_SIZE    = 256;
-    private static final float NODATA       = -3.4028235E38f;
-    private static final float SIGNAL_FLOOR = -170.0f;
+    private static final int   TILE_SIZE  = 256;
+    private static final float NODATA     = -3.4028235E38f;
 
-    // ── SLD color ramp (cellcover-continuous.sld, opacity 0.70 = alpha 179) ───
-    private static final float[] STOP_V = {-170, -150, -130, -110,  -95,  -85,  -75,    0};
-    private static final int[]   STOP_R = {0x00, 0x00, 0x1F, 0x2C, 0x5F, 0x9D, 0xD2, 0xFD};
-    private static final int[]   STOP_G = {0x20, 0x33, 0x4E, 0x78, 0xA0, 0xBA, 0xCE, 0xE7};
-    private static final int[]   STOP_B = {0x4D, 0x6F, 0x79, 0x8E, 0x60, 0x46, 0x3E, 0x25};
-    private static final int     STOP_A = 179;
-    private static final int     OFF_CELL_ARGB = (STOP_A << 24) | 0xFF0000;
+    // Density color ramp: index 0 = strongest (5+ cells), index 4 = weakest (1 cell)
+    // Matches DENSITY_RGB in WmsProxyController (green → light-blue)
+    private static final int[] DENSITY_RGB   = {0x00FF00, 0x00FF99, 0x00FFCC, 0x00CCFF, 0x0099FF};
+    private static final int   DENSITY_ALPHA = 140;   // opacity 0.55, matching SLD
+    private static final int   OFF_CELL_ARGB = (140 << 24) | 0xFF0000;
 
     @Autowired
     private MinioStorageService minioStorage;
@@ -90,48 +78,21 @@ public class PixelMaxSignalService {
     @Autowired
     private RasterCoverageRepository repository;
 
-    // ── Geo-transform cache ───────────────────────────────────────────────────
+    // ── geo-transform cache ───────────────────────────────────────────────────
 
-    /**
-     * Geo-transform + extent metadata extracted from a COG file.
-     * {@code width}/{@code height} are the full-resolution pixel dimensions, used for a
-     * fast right/bottom bounds check before opening the COG stream.
-     */
     private record TiffMeta(double ulLon, double ulLat, double xRes, double yRes,
                             int width, int height) {}
 
-    /** Parsed once per unique cell_id, never evicted (files don't change). */
     private final ConcurrentHashMap<String, TiffMeta> metaCache = new ConcurrentHashMap<>();
 
-    /**
-     * Number of images (full-res + overviews) in the COG — constant for the file's lifetime.
-     * Cached after the first {@link ImageReader#getNumImages} call so subsequent reads skip it.
-     */
+    /** Cached number of images per cell — avoids ir.getNumImages(true) on every read. */
     private final ConcurrentHashMap<String, Integer> numImagesCache = new ConcurrentHashMap<>();
 
-    /** Removes all cached state for a cell. Call after a cell's COG file is replaced. */
-    public void invalidateMeta(String cellId) {
-        metaCache.remove(cellId);
-        numImagesCache.remove(cellId);
-        MinioRangeReader.invalidateHeader(MinioStorageService.continuousKey(cellId));
-    }
-
-    /**
-     * Loads geo-transform metadata from a COG file in MinIO via a range read.
-     *
-     * <p>A COG stores all TIFF IFD metadata (ModelPixelScale, ModelTiepoint, GeoKeys) at the
-     * front of the file.  We download only the first {@code HEADER_BYTES} bytes into a temp
-     * file and parse with GeoTiffReader — avoiding full-file downloads for large COGs (some are
-     * 30 MB+).  The first 16 KB is sufficient for typical COG metadata; we retry with 64 KB if
-     * it fails.
-     *
-     * <p>Result is cached so MinIO is only hit once per cell lifetime.
-     */
     private static final int[] META_HEADER_SIZES = {16 * 1024, 64 * 1024, 256 * 1024};
 
     private TiffMeta loadMeta(String cellId) {
         return metaCache.computeIfAbsent(cellId, id -> {
-            String key = MinioStorageService.continuousKey(id);
+            String key = MinioStorageService.binaryKey(id);
             MinioRangeReader rr = minioStorage.createRangeReader(key);
 
             for (int headerBytes : META_HEADER_SIZES) {
@@ -141,7 +102,7 @@ public class PixelMaxSignalService {
                     byte[] headerData = rr.read(new long[]{0, headerBytes - 1}).get(0L);
                     if (headerData == null) return null;
 
-                    tmp = Files.createTempFile("meta_" + id + "_", ".tif");
+                    tmp = Files.createTempFile("bmeta_" + id + "_", ".tif");
                     Files.write(tmp, headerData);
 
                     reader = new GeoTiffReader(tmp.toFile());
@@ -153,24 +114,30 @@ public class PixelMaxSignalService {
                     int    h    = grid.getSpan(1);
                     return new TiffMeta(env.getMinX(), env.getMaxY(), xRes, yRes, w, h);
                 } catch (Exception e) {
-                    log.debug("Meta parse with {}KB failed for {}: {}", headerBytes / 1024, id, e.getMessage());
+                    log.debug("Binary meta parse with {}KB failed for {}: {}", headerBytes / 1024, id, e.getMessage());
                 } finally {
                     if (reader != null) reader.dispose();
                     if (tmp    != null) try { Files.deleteIfExists(tmp); } catch (Exception ignored) {}
                 }
             }
-            log.warn("Cannot parse metadata for {} after all attempts", id);
+            log.warn("Cannot parse binary metadata for {} after all attempts", id);
             return null;
         });
     }
 
-    // ── Public entry point ────────────────────────────────────────────────────
+    public void invalidateMeta(String cellId) {
+        metaCache.remove(cellId);
+        numImagesCache.remove(cellId);
+        MinioRangeReader.invalidateHeader(MinioStorageService.binaryKey(cellId));
+    }
+
+    // ── public entry point ────────────────────────────────────────────────────
 
     /**
-     * Renders a 256×256 RGBA PNG tile using true per-pixel MAX signal strength.
+     * Renders a 256×256 RGBA PNG tile showing cell coverage density.
      *
-     * Visible (on) cells → color ramp.
-     * Hidden  (off) cells → red (#FF0000, alpha 179), only where no on-cell signal.
+     * <p>Visible cells → density color (1 cell = blue, 5+ cells = green).
+     * Hidden cells → red, only where no visible cell overlaps.
      */
     public byte[] renderTile(int z, int x, int y) throws Exception {
         double[] bbox = tileToWgs84Bbox(z, x, y);
@@ -181,9 +148,8 @@ public class PixelMaxSignalService {
 
         if (visibleIds.isEmpty() && hiddenIds.isEmpty()) return transparentPng();
 
-        float[]   maxSignal   = new float[TILE_SIZE * TILE_SIZE];
+        int[]     density     = new int[TILE_SIZE * TILE_SIZE];
         boolean[] offCoverage = new boolean[TILE_SIZE * TILE_SIZE];
-        Arrays.fill(maxSignal, NODATA);
 
         List<CompletableFuture<float[]>> visFutures = visibleIds.stream()
                 .map(id -> CompletableFuture.supplyAsync(
@@ -198,46 +164,30 @@ public class PixelMaxSignalService {
             float[] data = f.join();
             if (data == null) continue;
             for (int i = 0; i < TILE_SIZE * TILE_SIZE; i++) {
-                float v = data[i];
-                if (v > SIGNAL_FLOOR && Float.isFinite(v) && v != NODATA
-                        && (maxSignal[i] == NODATA || v > maxSignal[i])) {
-                    maxSignal[i] = v;
-                }
+                if (isCovered(data[i])) density[i]++;
             }
         }
         for (CompletableFuture<float[]> f : hidFutures) {
             float[] data = f.join();
             if (data == null) continue;
             for (int i = 0; i < TILE_SIZE * TILE_SIZE; i++) {
-                float v = data[i];
-                if (v > SIGNAL_FLOOR && Float.isFinite(v) && v != NODATA) offCoverage[i] = true;
+                if (isCovered(data[i])) offCoverage[i] = true;
             }
         }
 
-        return encodePng(renderPixels(maxSignal, offCoverage));
+        return encodePng(renderPixels(density, offCoverage));
     }
 
     // ── COG windowed read via range reads ─────────────────────────────────────
 
-    /**
-     * Reads the COG window for the given tile bbox using HTTP range reads.
-     *
-     * <p>Overview selection: picks the lowest-resolution overview whose pixel size is still
-     * smaller than (or equal to) the map tile's pixel size, so we read the minimum data
-     * needed for correct rendering at the requested zoom.
-     *
-     * <p>Returns float[256*256] (row 0 = northernmost, row-major).
-     * Pixels outside the cell's extent stay NODATA.
-     */
     float[] readCogWindow(String cellId, int z,
                           double lonMin, double latMin, double lonMax, double latMax) {
-        String key = MinioStorageService.continuousKey(cellId);
+        String key = MinioStorageService.binaryKey(cellId);
 
         TiffMeta meta = loadMeta(cellId);
         if (meta == null) return null;
 
-        // ── overview level: match map resolution to avoid reading full-res data at low zoom ──
-        int   level   = overviewLevel(z, meta.xRes());
+        int    level  = overviewLevel(z, meta.xRes());
         double ovXRes = meta.xRes() * Math.pow(2, level);
         double ovYRes = meta.yRes() * Math.pow(2, level);
 
@@ -246,7 +196,6 @@ public class PixelMaxSignalService {
         double cogMinLat = meta.ulLat() - meta.height() * meta.yRes();
         if (lonMin >= cogMaxLon || latMax <= cogMinLat) return null;
 
-        // ── pixel window in overview coordinates ──────────────────────────────
         int srcX0 = (int) Math.floor((lonMin - meta.ulLon()) / ovXRes);
         int srcY0 = (int) Math.floor((meta.ulLat() - latMax) / ovYRes);
         int srcX1 = (int) Math.ceil ((lonMax - meta.ulLon()) / ovXRes);
@@ -256,25 +205,19 @@ public class PixelMaxSignalService {
         srcY0 = Math.max(0, srcY0);
         if (srcX1 <= srcX0 || srcY1 <= srcY0) return null;
 
-        // ── COG range reads: header (cached) + tile ranges for this window only ──
         if (COG_READER_SPI == null) return null;
         URI uri = URI.create(minioStorage.httpUrl(key));
         MinioRangeReader rangeReader = minioStorage.createRangeReader(key);
 
         try (DefaultCogImageInputStream cis = new DefaultCogImageInputStream(uri, rangeReader)) {
-            // Use the cached SPI directly — avoids the synchronized IIORegistry scan
-            // that ImageIO.getImageReaders() performs on every invocation.
             ImageReader ir = COG_READER_SPI.createReaderInstance();
             try {
                 ir.setInput(cis, false, true);
 
-                // getNumImages(true) forces a full IFD chain scan — cache the result
-                // so it is only paid once per cell across all tile requests.
                 int numImages   = numImagesCache.computeIfAbsent(cellId,
                         k -> { try { return ir.getNumImages(true); } catch (Exception e) { return 5; } });
                 int actualLevel = Math.min(level, numImages - 1);
                 if (actualLevel != level) {
-                    // Recompute source region at the actual (coarser) level
                     ovXRes = meta.xRes() * Math.pow(2, actualLevel);
                     ovYRes = meta.yRes() * Math.pow(2, actualLevel);
                     srcX0  = (int) Math.floor((lonMin - meta.ulLon()) / ovXRes);
@@ -299,11 +242,9 @@ public class PixelMaxSignalService {
                 ImageReadParam param = ir.getDefaultReadParam();
                 param.setSourceRegion(new Rectangle(srcX0, srcY0, srcW, srcH));
 
-                // CogImageReader fetches only the COG tiles overlapping sourceRegion
                 BufferedImage srcImg = ir.read(actualLevel, param);
                 Raster         raster = srcImg.getRaster();
 
-                // ── nearest-neighbour resample into 256×256 tile ──────────────
                 float[] data = new float[TILE_SIZE * TILE_SIZE];
                 Arrays.fill(data, NODATA);
 
@@ -328,38 +269,25 @@ public class PixelMaxSignalService {
                 ir.dispose();
             }
         } catch (Exception e) {
-            log.debug("Failed to read COG window for {}: {}", cellId, e.getMessage());
+            log.debug("Failed to read binary COG window for {}: {}", cellId, e.getMessage());
             return null;
         }
     }
 
-    /**
-     * Returns the COG overview level whose resolution best matches the map tile pixel size.
-     *
-     * <p>Level 0 = full resolution (cogXRes), level N = cogXRes × 2^N.
-     * We choose the highest level (coarsest) where the overview is still finer than
-     * the map tile resolution, so we don't over-sample.
-     *
-     * @param z       map zoom level
-     * @param cogXRes full-resolution pixel size in degrees
-     */
-    static int overviewLevel(int z, double cogXRes) {
-        // Map tile pixel size in degrees
-        double tilePixelDeg = 360.0 / Math.pow(2, z) / TILE_SIZE;
-        if (tilePixelDeg <= cogXRes) return 0;
-        // level = floor(log2(tilePixelDeg / cogXRes)), minimum 0
-        return Math.max(0, (int) (Math.log(tilePixelDeg / cogXRes) / Math.log(2.0)));
+    private static boolean isCovered(float v) {
+        return Float.isFinite(v) && v != NODATA;
     }
 
     // ── rendering ─────────────────────────────────────────────────────────────
 
-    private BufferedImage renderPixels(float[] maxSignal, boolean[] offCoverage) {
+    private BufferedImage renderPixels(int[] density, boolean[] offCoverage) {
         BufferedImage img = new BufferedImage(TILE_SIZE, TILE_SIZE, BufferedImage.TYPE_INT_ARGB);
         for (int i = 0; i < TILE_SIZE * TILE_SIZE; i++) {
-            float v = maxSignal[i];
-            boolean hasSignal = v > SIGNAL_FLOOR && Float.isFinite(v) && v != NODATA;
-            if (hasSignal) {
-                img.setRGB(i % TILE_SIZE, i / TILE_SIZE, signalToArgb(v));
+            int count = density[i];
+            if (count > 0) {
+                // index 0 = strongest (5+ cells), index 4 = weakest (1 cell)
+                int idx = Math.max(0, DENSITY_RGB.length - count);
+                img.setRGB(i % TILE_SIZE, i / TILE_SIZE, (DENSITY_ALPHA << 24) | DENSITY_RGB[idx]);
             } else if (offCoverage[i]) {
                 img.setRGB(i % TILE_SIZE, i / TILE_SIZE, OFF_CELL_ARGB);
             }
@@ -367,21 +295,13 @@ public class PixelMaxSignalService {
         return img;
     }
 
-    private int signalToArgb(float v) {
-        float vc = Math.max(STOP_V[0], Math.min(STOP_V[STOP_V.length - 1], v));
-        int lo = STOP_V.length - 2;
-        for (int s = 0; s < STOP_V.length - 1; s++) {
-            if (STOP_V[s + 1] >= vc) { lo = s; break; }
-        }
-        int hi = lo + 1;
-        float t = Math.max(0f, Math.min(1f, (vc - STOP_V[lo]) / (STOP_V[hi] - STOP_V[lo])));
-        int r = Math.round(STOP_R[lo] + t * (STOP_R[hi] - STOP_R[lo]));
-        int g = Math.round(STOP_G[lo] + t * (STOP_G[hi] - STOP_G[lo]));
-        int b = Math.round(STOP_B[lo] + t * (STOP_B[hi] - STOP_B[lo]));
-        return (STOP_A << 24) | (r << 16) | (g << 8) | b;
-    }
-
     // ── helpers ───────────────────────────────────────────────────────────────
+
+    static int overviewLevel(int z, double cogXRes) {
+        double tilePixelDeg = 360.0 / Math.pow(2, z) / TILE_SIZE;
+        if (tilePixelDeg <= cogXRes) return 0;
+        return Math.max(0, (int) (Math.log(tilePixelDeg / cogXRes) / Math.log(2.0)));
+    }
 
     static double[] tileToWgs84Bbox(int z, int x, int y) {
         double n = Math.pow(2, z);

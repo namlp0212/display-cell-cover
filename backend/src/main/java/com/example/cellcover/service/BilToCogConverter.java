@@ -198,6 +198,7 @@ public class BilToCogConverter {
                 "-of", "COG",
                 "-co", "BLOCKSIZE=256",
                 "-co", "COMPRESS=DEFLATE",
+                "-co", "PREDICTOR=3",       // IEEE-754 float byte-shuffle: ~33% better compression
                 "-co", "OVERVIEW_RESAMPLING=AVERAGE",
                 srcVrt.toAbsolutePath().toString(),
                 dstTif.toAbsolutePath().toString()

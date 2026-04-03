@@ -1,6 +1,7 @@
 package com.example.cellcover.controller;
 
 import com.example.cellcover.repository.RasterCoverageRepository;
+import com.example.cellcover.service.PixelCoverageService;
 import com.example.cellcover.service.PixelMaxSignalService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -48,10 +49,13 @@ public class WmsProxyController {
     @Value("${geoserver.overlap-groups}")
     private int overlapGroups;
 
-    private static final int PIXEL_MAX_ZOOM = 13;
+    private static final int PIXEL_MAX_ZOOM = 14;
 
     @Autowired
     private RasterCoverageRepository rasterCoverageRepository;
+
+    @Autowired
+    private PixelCoverageService pixelCoverageService;
 
     @Autowired
     private PixelMaxSignalService pixelMaxSignalService;
@@ -98,6 +102,9 @@ public class WmsProxyController {
     public ResponseEntity<byte[]> proxyWmsTileCompositeXYZ(
             @PathVariable int z, @PathVariable int x, @PathVariable int y
     ) throws Exception {
+        if (z >= PIXEL_MAX_ZOOM) {
+            return noStorePng().body(pixelCoverageService.renderTile(z, x, y));
+        }
         return proxyWmsTileComposite(tileToBbox(x, y, z));
     }
 
@@ -115,6 +122,9 @@ public class WmsProxyController {
     public ResponseEntity<byte[]> proxyWmsTileCompositeQP(
             @RequestParam int z, @RequestParam int x, @RequestParam int y
     ) throws Exception {
+        if (z >= PIXEL_MAX_ZOOM) {
+            return noStorePng().body(pixelCoverageService.renderTile(z, x, y));
+        }
         return proxyWmsTileComposite(tileToBbox(x, y, z));
     }
 

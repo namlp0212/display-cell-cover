@@ -26,7 +26,7 @@ try:
 except ImportError:
     def tqdm(it, **kw): return it
 
-RESOLUTIONS  = [7, 9]   # res=7 → zoom 0-7, res=9 → zoom 8-10
+RESOLUTIONS  = [6, 7, 8, 9, 10]  # res=6→z0-7, res=7→z8, res=8→z9, res=9→z10, res=10→z11-12
 MAX_PIXELS   = 40_000   # sample tối đa / cell
 WGS84        = CRS.from_epsg(4326)
 
@@ -144,8 +144,11 @@ def compute_cell(cell_id: str, svr_bil: Path, cur) -> int:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--raster-dir', default='data/rasters')
+    parser.add_argument('--cog-binary-dir', default=None,
+        help='Flat directory of {cell_id}_svr.tif files (e.g. data/cog/binary). '
+             'Used instead of --raster-dir when BIL files are unavailable.')
     parser.add_argument('--db-url',
-        default='postgresql://cellcover:cellcover@localhost:5434/cellcover')
+        default='postgresql://cellcover:cellcover@localhost:5432/cellcover')
     parser.add_argument('--prefix', default=None)
     parser.add_argument('--reset', action='store_true')
     args = parser.parse_args()
@@ -158,34 +161,54 @@ def main():
         cur.execute("TRUNCATE hex_coverage, cell_hex_map")
         conn.commit()
 
-    raster_dir = Path(args.raster_dir)
-    cell_dirs  = sorted(d for d in raster_dir.iterdir() if d.is_dir())
-    if args.prefix:
-        cell_dirs = [d for d in cell_dirs if d.name.startswith(args.prefix)]
-
-    print(f"Found {len(cell_dirs)} cells to process")
-    skipped = errors = 0
-    total_hex = 0
-
-    for cell_dir in tqdm(cell_dirs, desc='Processing cells'):
-        cell_id = cell_dir.name
-        svr_bil = cell_dir / f'{cell_id}.svr.bil'
-        if not svr_bil.exists():
-            skipped += 1
-            continue
-        try:
-            n = compute_cell(cell_id, svr_bil, cur)
-            conn.commit()
-            total_hex += n
-        except Exception as e:
-            conn.rollback()
-            errors += 1
-            print(f"\nERROR {cell_id}: {e}", file=sys.stderr)
+    if args.cog_binary_dir:
+        # Scan flat directory for *_svr.tif files
+        cog_dir = Path(args.cog_binary_dir)
+        tif_files = sorted(cog_dir.glob('*_svr.tif'))
+        if args.prefix:
+            tif_files = [f for f in tif_files if f.name.startswith(args.prefix)]
+        print(f"Found {len(tif_files)} TIF files to process in {cog_dir}")
+        skipped = errors = 0
+        total_hex = 0
+        for tif_file in tqdm(tif_files, desc='Processing TIF cells'):
+            cell_id = tif_file.name.replace('_svr.tif', '')
+            try:
+                n = compute_cell(cell_id, tif_file, cur)
+                conn.commit()
+                total_hex += n
+            except Exception as e:
+                conn.rollback()
+                errors += 1
+                print(f"\nERROR {cell_id}: {e}", file=sys.stderr)
+        processed = len(tif_files) - errors
+        print(f"\nDone: {processed} cells OK, {errors} errors, {total_hex} hex rows")
+    else:
+        raster_dir = Path(args.raster_dir)
+        cell_dirs  = sorted(d for d in raster_dir.iterdir() if d.is_dir())
+        if args.prefix:
+            cell_dirs = [d for d in cell_dirs if d.name.startswith(args.prefix)]
+        print(f"Found {len(cell_dirs)} cells to process")
+        skipped = errors = 0
+        total_hex = 0
+        for cell_dir in tqdm(cell_dirs, desc='Processing cells'):
+            cell_id = cell_dir.name
+            svr_bil = cell_dir / f'{cell_id}.svr.bil'
+            if not svr_bil.exists():
+                skipped += 1
+                continue
+            try:
+                n = compute_cell(cell_id, svr_bil, cur)
+                conn.commit()
+                total_hex += n
+            except Exception as e:
+                conn.rollback()
+                errors += 1
+                print(f"\nERROR {cell_id}: {e}", file=sys.stderr)
+        print(f"\nDone: {len(cell_dirs)-skipped-errors} cells OK, "
+              f"{skipped} skipped, {errors} errors, {total_hex} hex rows")
 
     cur.close()
     conn.close()
-    print(f"\nDone: {len(cell_dirs)-skipped-errors} cells OK, "
-          f"{skipped} skipped, {errors} errors, {total_hex} hex rows")
 
 
 if __name__ == '__main__':

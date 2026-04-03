@@ -3,6 +3,8 @@ package com.example.cellcover.service;
 import com.example.cellcover.config.CellImportProperties;
 import com.uber.h3core.H3Core;
 import com.uber.h3core.util.LatLng;
+import org.geotools.coverage.grid.GridCoverage2D;
+import org.geotools.gce.geotiff.GeoTiffReader;
 import org.locationtech.proj4j.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,6 +12,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.awt.image.Raster;
+import java.awt.image.RenderedImage;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -35,7 +39,7 @@ public class HexCoverageService {
 
     private static final Logger log = LoggerFactory.getLogger(HexCoverageService.class);
 
-    private static final int[]  RESOLUTIONS     = {6, 7, 8, 9};
+    private static final int[]  RESOLUTIONS     = {6, 7, 8, 9, 10};
     private static final int    MAX_PIXELS      = 40_000;
     /** Pixels at or below this threshold are treated as NoData. */
     private static final float  NODATA_THRESHOLD = -1e30f;
@@ -71,15 +75,23 @@ public class HexCoverageService {
      * @param epsgCode source CRS (e.g. "EPSG:32648")
      */
     public void computeForCell(String cellId, Path cellDir, Map<String, Double> hdr, String epsgCode) {
-        // Prefer continuous .bil for real signal values; fall back to binary .svr.bil
+        // Prefer continuous .bil for real signal values; fall back to binary .svr.bil, then _svr.tif COG
         Path bilFile = cellDir.resolve(cellId + ".bil");
         if (!Files.exists(bilFile)) bilFile = cellDir.resolve(cellId + ".svr.bil");
-        if (!Files.exists(bilFile)) {
-            log.warn("No BIL file found for cell {}, skipping hex coverage", cellId);
-            return;
+
+        List<double[]> pixels;
+        if (Files.exists(bilFile)) {
+            pixels = sampleValidPixels(bilFile, hdr, epsgCode);
+        } else {
+            Path tifFile = Paths.get(properties.getCogDir()).resolve("binary")
+                               .resolve(cellId + "_svr.tif");
+            if (!Files.exists(tifFile)) {
+                log.warn("No BIL or TIF file found for cell {}, skipping hex coverage", cellId);
+                return;
+            }
+            pixels = sampleValidPixelsFromTif(tifFile);
         }
 
-        List<double[]> pixels = sampleValidPixels(bilFile, hdr, epsgCode);
         if (pixels.isEmpty()) {
             log.warn("No valid pixels found for cell {}", cellId);
             return;
@@ -224,6 +236,66 @@ public class HexCoverageService {
             }
         } catch (IOException e) {
             log.warn("Failed to read BIL file: {}", bilFile, e);
+        }
+
+        return reservoir;
+    }
+
+    /**
+     * Reads valid pixels from a COG GeoTIFF (_svr.tif, already in EPSG:4326).
+     * Falls back to this when no .bil/.svr.bil file exists for the cell.
+     * Returns the same [lat, lng, signalValue] triples as sampleValidPixels.
+     */
+    private List<double[]> sampleValidPixelsFromTif(Path tifFile) {
+        List<double[]> reservoir = new ArrayList<>(MAX_PIXELS);
+        Random rng = new Random(42);
+        int validCount = 0;
+
+        GeoTiffReader reader = null;
+        GridCoverage2D coverage = null;
+        try {
+            reader = new GeoTiffReader(tifFile.toFile());
+            coverage = reader.read(null);
+
+            var env = coverage.getEnvelope();
+            double minX = env.getMinimum(0); // west longitude
+            double maxY = env.getMaximum(1); // north latitude
+            double width  = env.getSpan(0);
+            double height = env.getSpan(1);
+
+            RenderedImage img = coverage.getRenderedImage();
+            int ncols = img.getWidth();
+            int nrows = img.getHeight();
+            double lonPerPixel = width  / ncols;
+            double latPerPixel = height / nrows;
+
+            Raster data = img.getData();
+            int originX = img.getMinX();
+            int originY = img.getMinY();
+
+            for (int row = 0; row < nrows; row++) {
+                for (int col = 0; col < ncols; col++) {
+                    float v = data.getSampleFloat(originX + col, originY + row, 0);
+                    if (v > NODATA_THRESHOLD && Float.isFinite(v)
+                            && v >= SIGNAL_MIN_DBM && v <= SIGNAL_MAX_DBM) {
+                        double lon = minX + (col + 0.5) * lonPerPixel;
+                        double lat = maxY - (row + 0.5) * latPerPixel;
+                        double[] point = {lat, lon, v};
+                        validCount++;
+                        if (reservoir.size() < MAX_PIXELS) {
+                            reservoir.add(point);
+                        } else {
+                            int j = rng.nextInt(validCount);
+                            if (j < MAX_PIXELS) reservoir.set(j, point);
+                        }
+                    }
+                }
+            }
+        } catch (IOException e) {
+            log.warn("Failed to read TIF file: {}", tifFile, e);
+        } finally {
+            if (coverage != null) coverage.dispose(true);
+            if (reader   != null) reader.dispose();
         }
 
         return reservoir;
