@@ -48,9 +48,12 @@ public class BilToCogConverter {
     private static final Logger log = LoggerFactory.getLogger(BilToCogConverter.class);
 
     private final PixelMaxSignalService pixelMaxSignalService;
+    private final MinioStorageService   minioStorage;
 
-    public BilToCogConverter(PixelMaxSignalService pixelMaxSignalService) {
+    public BilToCogConverter(PixelMaxSignalService pixelMaxSignalService,
+                             MinioStorageService minioStorage) {
         this.pixelMaxSignalService = pixelMaxSignalService;
+        this.minioStorage          = minioStorage;
     }
 
     static {
@@ -77,6 +80,7 @@ public class BilToCogConverter {
             log.info("Converting {} → binary/{}_svr.tif", cellId, cellId);
             convertFile(bil, hdr, epsgCode, binOut);
         }
+        uploadIfAbsent(binOut, MinioStorageService.binaryKey(cellId));
 
         if (Files.exists(contOut)) {
             log.info("Continuous COG already exists, skipping: {}", contOut.getFileName());
@@ -85,6 +89,24 @@ public class BilToCogConverter {
             convertFileContinuous(bil, hdr, epsgCode, contOut);
             // Invalidate cached geo-transform so the new file is re-read on next tile request
             pixelMaxSignalService.invalidateMeta(cellId);
+        }
+        uploadIfAbsent(contOut, MinioStorageService.continuousKey(cellId));
+    }
+
+    /**
+     * Uploads {@code localFile} to MinIO under {@code key} if the object does not already exist.
+     * Errors are logged as warnings so a single upload failure does not abort the whole import.
+     */
+    private void uploadIfAbsent(Path localFile, String key) {
+        if (!Files.exists(localFile)) return;
+        if (minioStorage.exists(key)) {
+            log.info("MinIO object already exists, skipping upload: {}", key);
+            return;
+        }
+        try {
+            minioStorage.upload(localFile, key);
+        } catch (Exception e) {
+            log.warn("Failed to upload {} to MinIO: {}", key, e.getMessage());
         }
     }
 

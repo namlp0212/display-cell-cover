@@ -137,6 +137,51 @@ html, body {
   }
 }
 
+// ── Simulation dropdown control ───────────────────────────────────────────────
+.sim-control {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(4px);
+  border-radius: 6px;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.25);
+  padding: 6px 10px;
+  margin-top: 4px;
+}
+
+.sim-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sim-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #444;
+  white-space: nowrap;
+}
+
+.sim-select {
+  font-size: 12px;
+  padding: 3px 4px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  background: #fff;
+  cursor: pointer;
+  max-width: 200px;
+}
+
+.sim-refresh {
+  border: none;
+  background: transparent;
+  font-size: 16px;
+  cursor: pointer;
+  color: #444;
+  padding: 0 2px;
+  line-height: 1;
+
+  &:hover { color: #2a7a2a; }
+}
+
 // ── Zoom badge ────────────────────────────────────────────────────────────────
 .zoom-badge {
   position: absolute;
@@ -148,10 +193,6 @@ html, body {
   font-size: 12px;
   font-weight: 600;
   color: #fff;
+  background: #2a7a2a;
   pointer-events: none;
-  transition: background-color 0.3s;
-
-  &.hex  { background: #bd0026; }
-  &.bbox { background: #0064ff; }
-  &.wms  { background: #2a7a2a; }
 }

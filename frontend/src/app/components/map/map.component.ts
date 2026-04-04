@@ -1,113 +1,92 @@
-import { Component, OnInit, OnDestroy, Output, EventEmitter } from '@angular/core';
-import { NgIf } from '@angular/common';
+import { Component, OnInit, OnDestroy } from '@angular/core';
+import { NgIf, NgFor } from '@angular/common';
 import * as L from 'leaflet';
 import '@maplibre/maplibre-gl-leaflet';
-import { RasterTileSource, VectorTileSource } from 'maplibre-gl';
-import { Subject, Subscription } from 'rxjs';
-import { debounceTime, switchMap } from 'rxjs/operators';
-import { LayerService } from '../../services/layer.service';
-import { RasterCoverage } from '../../models/raster-coverage.model';
+import { VectorTileSource } from 'maplibre-gl';
+import { Subscription } from 'rxjs';
 import { environment } from '../../../environments/environment';
+import { SimulationService, Simulation } from '../../services/simulation.service';
+import { AlertService } from '../../services/alert.service';
 
-export type DisplayMode = 'coverage' | 'signal-max';
+export type DisplayMode = 'coverage' | 'signal';
 
 @Component({
   selector: 'app-map',
   standalone: true,
-  imports: [NgIf],
+  imports: [NgIf, NgFor],
   templateUrl: './map.component.html',
   styleUrl: './map.component.scss'
 })
 export class MapComponent implements OnInit, OnDestroy {
-  @Output() coveragesChanged = new EventEmitter<RasterCoverage[]>();
-
-  // Zoom boundaries
-  private static readonly ZOOM_WMS = 13;  // < 13: hex heatmap  |  >= 13: WMS raster
 
   private map!: L.Map;
   private glLayer!: L.MaplibreGL;
-  private tileVersion = 0;
-  private moveEnd$ = new Subject<L.LatLngBounds>();
-  private subscription!: Subscription;
+  private subscriptions = new Subscription();
 
   isLoading = true;
 
-  /** Current display mode */
+  // ── UI state ───────────────────────────────────────────────────────────────
   displayMode: DisplayMode = 'coverage';
-
-  /** WMS raster layer opacity (0–1). Default 0.65, adjustable via slider. */
   wmsOpacity = 0.65;
+  simulations: Simulation[] = [];
+  selectedSimId: string | null = null;
 
-  /** Reference to the legend control so we can remove/re-add it on mode change */
   private legendControl: L.Control | null = null;
 
-  constructor(private layerService: LayerService) {}
+  constructor(
+    private simService: SimulationService,
+    private alertService: AlertService
+  ) {}
 
   ngOnInit(): void {
     this.initMap();
-    this.initMoveEndSubscription();
+    this.loadSimulations();
+    this.subscribeAlerts();
   }
 
   ngOnDestroy(): void {
-    this.subscription?.unsubscribe();
+    this.subscriptions.unsubscribe();
     this.map?.remove();
   }
 
-  /** Called from AppComponent after toggle visibility */
-  refreshMap(): void {
-    this.tileVersion++;
-    this.applyToggleByZoom();
-    this.moveEnd$.next(this.map.getBounds());
+  // ── Simulation dropdown ────────────────────────────────────────────────────
+
+  loadSimulations(): void {
+    this.simService.listActive().subscribe({
+      next: sims => { this.simulations = sims; },
+      error: err => console.error('Failed to load simulations:', err)
+    });
   }
 
-  /** Switch between coverage / signal-avg / signal-max modes */
-  setDisplayMode(mode: DisplayMode): void {
-    if (this.displayMode === mode) return;
-    this.displayMode = mode;
-    this.applyToggleByZoom();
-    this.rebuildLegend();
-    const glMap = this.glLayer?.getMaplibreMap();
-    if (glMap?.getLayer('hex-fill')) {
-      this.updateHexLayerPaint(glMap);
-    }
+  selectSim(simId: string | null): void {
+    this.selectedSimId = simId;
+    this.reloadH3Tiles();
   }
 
-  // --- Color helpers ---------------------------------------------------------
-
-  /** Fill color by count (0 = off-cell). Used in coverage mode. */
-  static getColor(count: number): string {
-    if (count <= 0)  return '#FF0000';  // OFF
-    if (count < 5)   return '#0099FF';  // Very Weak  (1-4)
-    if (count < 15)  return '#00CCFF';  // Weak       (5-14)
-    if (count < 40)  return '#00FFCC';  // Medium    (15-39)
-    if (count < 100) return '#00FF99';  // Strong    (40-99)
-    return                  '#00FF00';  // Very Strong (>=100)
+  endSim(simId: string): void {
+    this.simService.end(simId).subscribe({
+      next: () => {
+        if (this.selectedSimId === simId) {
+          this.selectedSimId = null;
+        }
+        this.loadSimulations();
+        this.reloadH3Tiles();
+      }
+    });
   }
 
-  /**
-   * Fill color by signal strength (dBm scale, range -140 to -73).
-   * Used in both signal-avg and signal-max modes.
-   */
-  static getSignalColor(dbm: number): string {
-    if (dbm < -130) return '#00204D';   // Rất kém
-    if (dbm < -120) return '#00336F';   // Kém
-    if (dbm < -110) return '#1F4E79';   // Yếu
-    if (dbm < -100) return '#2C788E';   // Trung bình
-    if (dbm < -90)  return '#5FA060';   // Khá
-    if (dbm < -85)  return '#9DBA46';   // Tốt
-    if (dbm < -80)  return '#D2CE3E';   // Rất tốt
-    return                 '#FDE725';   // Tuyệt vời
+  // ── Alert WebSocket ────────────────────────────────────────────────────────
+
+  private subscribeAlerts(): void {
+    this.subscriptions.add(
+      this.alertService.cellStatusChanged$.subscribe(() => {
+        // Invalidate tile cache by reloading source with a new timestamp
+        this.reloadH3Tiles();
+      })
+    );
   }
 
-  /** Darken a #RRGGBB hex color by 20%. */
-  private static darken(hex: string): string {
-    const r = Math.round(parseInt(hex.slice(1, 3), 16) * 0.8);
-    const g = Math.round(parseInt(hex.slice(3, 5), 16) * 0.8);
-    const b = Math.round(parseInt(hex.slice(5, 7), 16) * 0.8);
-    return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
-  }
-
-  // --- Map init --------------------------------------------------------------
+  // ── Map init ───────────────────────────────────────────────────────────────
 
   private initMap(): void {
     this.map = L.map('map', {
@@ -134,174 +113,162 @@ export class MapComponent implements OnInit, OnDestroy {
             tileSize: 256,
             attribution: '© Google Maps'
           },
-          'hex-coverage': {
+          'h3-coverage': {
             type: 'vector',
-            tiles: [`${environment.pgTileservUrl}/public.hex_density_tile/{z}/{x}/{y}.pbf`],
-            minzoom: 0,
-            maxzoom: 12
+            tiles: [this.h3TileUrl()],
+            minzoom: 6,
+            maxzoom: 16
           },
-          // Single composite source: backend merges on-cell (normal) and off-cell
-          // (red) tiles pixel-by-pixel so pixels covered by any on-cell always
-          // show the normal coverage colour, never red.
-          'wms-composite': {
+          'pixel-coverage': {
             type: 'raster',
-            tiles: [this.baseTileUrl()],
-            tileSize: 256,
-            maxzoom: 18
+            tiles: [this.pixelTileUrl()],
+            minzoom: 17,
+            maxzoom: 19,
+            tileSize: 256
           }
         },
         layers: [
           { id: 'google-tiles', type: 'raster', source: 'google' },
           {
-            id: 'hex-fill',
+            id: 'h3-fill',
             type: 'fill',
-            source: 'hex-coverage',
-            'source-layer': 'hex_coverage',
-            maxzoom: MapComponent.ZOOM_WMS,
-            paint: this.buildHexFillPaint()
+            source: 'h3-coverage',
+            'source-layer': 'coverage',
+            maxzoom: 17,
+            paint: this.buildFillPaint()
           },
           {
-            id: 'hex-stroke',
+            id: 'h3-stroke',
             type: 'line',
-            source: 'hex-coverage',
-            'source-layer': 'hex_coverage',
-            maxzoom: MapComponent.ZOOM_WMS,
-            paint: this.buildHexStrokePaint()
+            source: 'h3-coverage',
+            'source-layer': 'coverage',
+            maxzoom: 17,
+            paint: this.buildStrokePaint()
           },
           {
-            // Composite tile: backend already applies pixel-accurate logic
-            // (on-cell pixels take priority over off-cell red pixels).
-            id: 'wms-composite-raster',
+            id: 'pixel-raster',
             type: 'raster',
-            source: 'wms-composite',
-            minzoom: MapComponent.ZOOM_WMS,
-            paint: {
-              'raster-opacity': this.wmsOpacity,
-              'raster-fade-duration': 0
-            }
+            source: 'pixel-coverage',
+            minzoom: 17,
+            paint: { 'raster-opacity': this.wmsOpacity }
           }
         ]
       }
     }).addTo(this.map);
 
     const glMap = this.glLayer.getMaplibreMap();
-
     glMap.on('load', () => {
       this.setupPopup();
       this.setupZoomBadge();
-      this.applyToggleByZoom();
     });
-
     glMap.on('dataloading', () => { this.isLoading = true; });
     glMap.on('idle', () => { this.isLoading = false; });
 
     this.addLegend();
     this.addModeToggle();
-
-    this.map.on('moveend', () => {
-      this.moveEnd$.next(this.map.getBounds());
-    });
+    this.addSimDropdown();
   }
 
-  // --- Hex layer paint expressions -------------------------------------------
+  // ── Tile URLs ──────────────────────────────────────────────────────────────
 
-  /**
-   * MapLibre step expression matching the cellcover-continuous SLD color stops.
-   * Thresholds aligned with SLD: -150, -130, -110, -95, -85, -75, -65.
-   */
-  private signalColorExpr(prop: 'avg_signal' | 'max_signal'): unknown[] {
-    return [
-      'case',
-      ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], '#FF0000',
-      ['!', ['has', prop]], '#1F4E79',
-      ['<', ['get', prop], -150], '#00204D',
-      ['<', ['get', prop], -130], '#00336F',
-      ['<', ['get', prop], -110], '#1F4E79',
-      ['<', ['get', prop], -95],  '#2C788E',
-      ['<', ['get', prop], -85],  '#5FA060',
-      ['<', ['get', prop], -75],  '#9DBA46',
-      ['<', ['get', prop], -65],  '#D2CE3E',
-      '#FDE725'
-    ];
+  private h3TileUrl(): string {
+    const base = `${environment.apiUrl}/h3-tile/{z}/{x}/{y}?mode=${this.displayMode}&t=${Date.now()}`;
+    return this.selectedSimId ? `${base}&sim=${this.selectedSimId}` : base;
   }
 
-  private buildHexFillPaint(): object {
+  private pixelTileUrl(): string {
+    // Use /api/h3-tile which routes to PixelCoverageService / PixelMaxSignalService at zoom >= 18
+    const base = `${environment.apiUrl}/h3-tile/{z}/{x}/{y}?mode=${this.displayMode}&t=${Date.now()}`;
+    return this.selectedSimId ? `${base}&sim=${this.selectedSimId}` : base;
+  }
+
+  private reloadH3Tiles(): void {
+    const glMap = this.glLayer?.getMaplibreMap();
+    if (!glMap?.loaded()) return;
+
+    const h3Src = glMap.getSource('h3-coverage') as VectorTileSource;
+    h3Src?.setTiles([this.h3TileUrl()]);
+
+    // Reload pixel raster source at the same time so both layers stay in sync
+    const pixelSrc = glMap.getSource('pixel-coverage') as any;
+    pixelSrc?.setTiles([this.pixelTileUrl()]);
+  }
+
+  // ── Display mode ───────────────────────────────────────────────────────────
+
+  setDisplayMode(mode: DisplayMode): void {
+    if (this.displayMode === mode) return;
+    this.displayMode = mode;
+    this.rebuildLegend();
+    const glMap = this.glLayer?.getMaplibreMap();
+    if (glMap?.getLayer('h3-fill')) {
+      this.updateLayerPaint(glMap);
+    }
+    this.reloadH3Tiles();
+  }
+
+  // ── Paint expressions ──────────────────────────────────────────────────────
+  // Properties from backend MVT: on_density (int), off_density (int), on_signal (float dBm)
+
+  private buildFillPaint(): object {
     const o = this.wmsOpacity;
-    if (this.displayMode === 'signal-max') {
+    if (this.displayMode === 'signal') {
       return {
-        'fill-color': this.signalColorExpr('max_signal'),
+        'fill-color': [
+          'case',
+          // Off only (no on-cell covering this hex)
+          ['all', ['==', ['get', 'on_density'], 0], ['>', ['get', 'off_density'], 0]], '#FF0000',
+          ['>', ['get', 'on_density'], 0], [
+            'case',
+            ['<', ['get', 'on_signal'], -150], '#00204D',
+            ['<', ['get', 'on_signal'], -130], '#00336F',
+            ['<', ['get', 'on_signal'], -110], '#1F4E79',
+            ['<', ['get', 'on_signal'], -95],  '#2C788E',
+            ['<', ['get', 'on_signal'], -85],  '#5FA060',
+            ['<', ['get', 'on_signal'], -75],  '#9DBA46',
+            ['<', ['get', 'on_signal'], -65],  '#D2CE3E',
+            '#FDE725'
+          ],
+          'transparent'
+        ],
         'fill-opacity': [
           'case',
-          ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], 0.75 * o,
-          ['>', ['get', 'count'], 0], 0.70 * o,
+          ['all', ['==', ['get', 'on_density'], 0], ['>', ['get', 'off_density'], 0]], 0.75 * o,
+          ['>', ['get', 'on_density'], 0], 0.70 * o,
           0
-        ],
-        'fill-outline-color': [
-          'case',
-          ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], '#CC0000',
-          ['>', ['get', 'count'], 0], '#2C788E',
-          'transparent'
         ]
       };
     }
-    // Coverage mode (default)
+    // Coverage density mode
     return {
       'fill-color': [
         'case',
-        ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], '#FF0000',
-        ['>=', ['get', 'count'], 100], '#00FF00',
-        ['>=', ['get', 'count'], 40],  '#00FF99',
-        ['>=', ['get', 'count'], 15],  '#00FFCC',
-        ['>=', ['get', 'count'], 5],   '#00CCFF',
-        ['>', ['get', 'count'], 0],    '#0099FF',
+        ['all', ['==', ['get', 'on_density'], 0], ['>', ['get', 'off_density'], 0]], '#FF0000',
+        ['>=', ['get', 'on_density'], 5], '#00FF00',
+        ['>=', ['get', 'on_density'], 3], '#00FF99',
+        ['>=', ['get', 'on_density'], 2], '#00FFCC',
+        ['==', ['get', 'on_density'], 1], '#0099FF',
         'transparent'
       ],
       'fill-opacity': [
         'case',
-        ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], 0.75 * o,
-        ['>=', ['get', 'count'], 100], 0.85 * o,
-        ['>=', ['get', 'count'], 40],  0.75 * o,
-        ['>=', ['get', 'count'], 15],  0.65 * o,
-        ['>=', ['get', 'count'], 5],   0.55 * o,
-        ['>', ['get', 'count'], 0],    0.45 * o,
+        ['all', ['==', ['get', 'on_density'], 0], ['>', ['get', 'off_density'], 0]], 0.75 * o,
+        ['>=', ['get', 'on_density'], 5], 0.85 * o,
+        ['>=', ['get', 'on_density'], 3], 0.75 * o,
+        ['>=', ['get', 'on_density'], 2], 0.65 * o,
+        ['==', ['get', 'on_density'], 1], 0.50 * o,
         0
-      ],
-      'fill-outline-color': [
-        'case',
-        ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], '#CC0000',
-        ['>=', ['get', 'count'], 100], '#00CC00',
-        ['>=', ['get', 'count'], 40],  '#00CC7A',
-        ['>=', ['get', 'count'], 15],  '#00CCA3',
-        ['>=', ['get', 'count'], 5],   '#00A3CC',
-        ['>', ['get', 'count'], 0],    '#007ACC',
-        'transparent'
       ]
     };
   }
 
-  private buildHexStrokePaint(): object {
+  private buildStrokePaint(): object {
     const o = this.wmsOpacity;
-    if (this.displayMode === 'signal-max') {
-      return {
-        'line-color': [
-          'case',
-          ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], '#CC0000',
-          ['>', ['get', 'count'], 0], '#007A99',
-          'transparent'
-        ],
-        'line-width': 0.5,
-        'line-opacity': o
-      };
-    }
     return {
       'line-color': [
         'case',
-        ['all', ['==', ['get', 'count'], 0], ['>', ['get', 'total'], 0]], '#CC0000',
-        ['>=', ['get', 'count'], 100], '#00CC00',
-        ['>=', ['get', 'count'], 40],  '#00CC7A',
-        ['>=', ['get', 'count'], 15],  '#00CCA3',
-        ['>=', ['get', 'count'], 5],   '#00A3CC',
-        ['>', ['get', 'count'], 0],    '#007ACC',
+        ['all', ['==', ['get', 'on_density'], 0], ['>', ['get', 'off_density'], 0]], '#CC0000',
+        ['>', ['get', 'on_density'], 0], '#007ACC',
         'transparent'
       ],
       'line-width': 0.5,
@@ -309,129 +276,72 @@ export class MapComponent implements OnInit, OnDestroy {
     };
   }
 
-  /** Re-applies hex fill/stroke paint expressions to the loaded MapLibre map. */
-  private updateHexLayerPaint(glMap: ReturnType<L.MaplibreGL['getMaplibreMap']>): void {
-    const fillPaint = this.buildHexFillPaint() as Record<string, unknown>;
-    const strokePaint = this.buildHexStrokePaint() as Record<string, unknown>;
-
-    // fill-color, fill-opacity, fill-outline-color
-    for (const [prop, val] of Object.entries(fillPaint)) {
-      glMap.setPaintProperty('hex-fill', prop, val);
-    }
-    // line-color, line-width, line-opacity
-    for (const [prop, val] of Object.entries(strokePaint)) {
-      glMap.setPaintProperty('hex-stroke', prop, val);
+  private updateLayerPaint(glMap: ReturnType<L.MaplibreGL['getMaplibreMap']>): void {
+    const fill   = this.buildFillPaint()   as Record<string, unknown>;
+    const stroke = this.buildStrokePaint() as Record<string, unknown>;
+    for (const [k, v] of Object.entries(fill))   glMap.setPaintProperty('h3-fill',   k, v);
+    for (const [k, v] of Object.entries(stroke)) glMap.setPaintProperty('h3-stroke', k, v);
+    // Pixel raster layer — only opacity is dynamic (mode is encoded in the tile URL)
+    if (glMap.getLayer('pixel-raster')) {
+      glMap.setPaintProperty('pixel-raster', 'raster-opacity', this.wmsOpacity);
     }
   }
 
-  // --- Popup -----------------------------------------------------------------
+  // ── Popup ──────────────────────────────────────────────────────────────────
 
   private setupPopup(): void {
     const glMap = this.glLayer.getMaplibreMap();
     const popup = L.popup({ maxWidth: 300 });
 
     this.map.on('click', (e: L.LeafletMouseEvent) => {
-      const point = glMap.project([e.latlng.lng, e.latlng.lat]);
-      const features = glMap.queryRenderedFeatures(point, { layers: ['hex-fill'] });
+      const pt = glMap.project([e.latlng.lng, e.latlng.lat]);
+      const features = glMap.queryRenderedFeatures(pt, { layers: ['h3-fill'] });
       if (!features?.length) return;
       const p = features[0].properties;
 
-      const modeLabel = this.displayMode === 'signal-max' ? 'Max Signal' : 'Coverage Density';
-      let content = `<strong>${modeLabel}</strong><br>
-        Visible cells: <b>${p?.['count']}</b><br>
-        Total cells: <b>${p?.['total']}</b>`;
-
-      if (this.isSignalMode()) {
-        const avg = p?.['avg_signal'];
-        const max = p?.['max_signal'];
-        if (avg != null) content += `<br>Avg signal: <b>${(avg as number).toFixed(1)} dBm</b>`;
-        if (max != null) content += `<br>Max signal: <b>${(max as number).toFixed(1)} dBm</b>`;
+      let content = `<strong>${this.displayMode === 'signal' ? 'Signal' : 'Coverage'}</strong><br>
+        ON cells: <b>${p?.['on_density']}</b><br>
+        OFF cells: <b>${p?.['off_density']}</b>`;
+      if (this.displayMode === 'signal' && p?.['on_density'] > 0) {
+        content += `<br>Max signal: <b>${(p?.['on_signal'] as number).toFixed(1)} dBm</b>`;
       }
 
-      popup
-        .setLatLng(e.latlng)
-        .setContent(content)
-        .openOn(this.map);
+      popup.setLatLng(e.latlng).setContent(content).openOn(this.map);
     });
   }
 
-  // --- Zoom badge ------------------------------------------------------------
+  // ── Zoom badge ─────────────────────────────────────────────────────────────
 
   private setupZoomBadge(): void {
+    const glMap = this.glLayer.getMaplibreMap();
+
     this.map.on('zoom', () => {
       const z = this.map.getZoom();
       const badge = document.getElementById('zoom-badge');
       if (!badge) return;
-      if (z < MapComponent.ZOOM_WMS) {
-        const res = z <= 7 ? 'Res6' : z <= 8 ? 'Res7' : z <= 10 ? 'Res8' : 'Res9';
-        badge.textContent = `Z${z.toFixed(1)} — Hex heatmap (${res})`;
-        badge.className = 'zoom-badge hex';
+
+      if (z >= 18) {
+        badge.textContent = `Z${z.toFixed(1)} — Pixel tile`;
       } else {
-        badge.textContent = `Z${z.toFixed(1)} — WMS raster`;
-        badge.className = 'zoom-badge wms';
+        const res = z <= 6 ? 5 : z === 7 ? 6 : z <= 9 ? 7 : z === 10 ? 8
+                  : z <= 12 ? 9 : z === 13 ? 10 : z === 14 ? 11 : z <= 16 ? 12 : 13;
+        badge.textContent = `Z${z.toFixed(1)} — H3 res${res}`;
+      }
+
+      // Explicit layer toggle at zoom 18 boundary — guards against
+      // fractional-zoom mismatches between Leaflet and MapLibre GL
+      const isPixel = z >= 18;
+      if (glMap.getLayer('h3-fill')) {
+        glMap.setLayoutProperty('h3-fill',   'visibility', isPixel ? 'none' : 'visible');
+        glMap.setLayoutProperty('h3-stroke', 'visibility', isPixel ? 'none' : 'visible');
+      }
+      if (glMap.getLayer('pixel-raster')) {
+        glMap.setLayoutProperty('pixel-raster', 'visibility', isPixel ? 'visible' : 'none');
       }
     });
   }
 
-  // --- Move end -> fetch coverages -------------------------------------------
-
-  private initMoveEndSubscription(): void {
-    this.subscription = this.moveEnd$.pipe(
-      debounceTime(150),
-      switchMap(bounds => {
-        const sw = bounds.getSouthWest();
-        const ne = bounds.getNorthEast();
-        return this.layerService.getVisibleLayers(sw.lng, sw.lat, ne.lng, ne.lat);
-      })
-    ).subscribe({
-      next: (coverages) => {
-        this.coveragesChanged.emit(coverages);
-      },
-      error: (err) => console.error('Error fetching layers:', err)
-    });
-
-    setTimeout(() => this.refreshMap(), 100);
-  }
-
-  // --- Toggle logic by zoom --------------------------------------------------
-
-  private applyToggleByZoom(): void {
-    const glMap = this.glLayer?.getMaplibreMap();
-    if (!glMap?.loaded()) return;
-    if (this.map.getZoom() >= MapComponent.ZOOM_WMS) {
-      this.updateWmsSource();
-    } else {
-      this.reloadHexTiles();
-    }
-  }
-
-  private reloadHexTiles(): void {
-    const glMap = this.glLayer.getMaplibreMap();
-    const src = glMap.getSource('hex-coverage') as VectorTileSource;
-    src?.setTiles([
-      `${environment.pgTileservUrl}/public.hex_density_tile/{z}/{x}/{y}.pbf?t=${Date.now()}`
-    ]);
-  }
-
-  private updateWmsSource(): void {
-    const glMap = this.glLayer?.getMaplibreMap();
-    if (!glMap) return;
-    const src = glMap.getSource('wms-composite') as RasterTileSource;
-    src?.setTiles([this.baseTileUrl()]);
-  }
-
-  private baseTileUrl(): string {
-    const api = environment.apiUrl;
-    const v = this.tileVersion;
-    if (this.displayMode === 'signal-max') return `${api}/wms-tile-signal-xyz?v=${v}&z={z}&x={x}&y={y}`;
-    return `${api}/wms-tile-xyz?v=${v}&z={z}&x={x}&y={y}`;
-  }
-
-  private isSignalMode(): boolean {
-    return this.displayMode === 'signal-max';
-  }
-
-  // --- Mode toggle button ----------------------------------------------------
+  // ── Mode toggle control ────────────────────────────────────────────────────
 
   private addModeToggle(): void {
     const self = this;
@@ -440,19 +350,19 @@ export class MapComponent implements OnInit, OnDestroy {
         const div = L.DomUtil.create('div', 'mode-toggle');
         div.innerHTML = `
           <div class="mode-btn-row">
-            <button class="mode-btn active" data-mode="coverage"   title="Coverage density — số cell phủ tại mỗi hex">Coverage</button>
-            <button class="mode-btn"        data-mode="signal-max" title="Max Signal — cường độ sóng tốt nhất tại mỗi điểm">Max Signal</button>
+            <button class="mode-btn active" data-mode="coverage" title="Coverage density">Coverage</button>
+            <button class="mode-btn"        data-mode="signal"   title="Max Signal (dBm)">Signal</button>
           </div>
           <div class="opacity-row">
-            <span class="opacity-label">Độ mờ</span>
+            <span class="opacity-label">Opacity</span>
             <input class="opacity-slider" type="range" min="0" max="1" step="0.05"
                    value="${self.wmsOpacity}">
             <span class="opacity-value">${Math.round(self.wmsOpacity * 100)}%</span>
           </div>
         `;
 
-        div.querySelectorAll('.mode-btn').forEach((btn) => {
-          L.DomEvent.on(btn as HTMLElement, 'click', (e) => {
+        div.querySelectorAll('.mode-btn').forEach(btn => {
+          L.DomEvent.on(btn as HTMLElement, 'click', e => {
             L.DomEvent.stopPropagation(e);
             const mode = (btn as HTMLElement).dataset['mode'] as DisplayMode;
             self.setDisplayMode(mode);
@@ -462,17 +372,13 @@ export class MapComponent implements OnInit, OnDestroy {
         });
 
         const slider = div.querySelector('.opacity-slider') as HTMLInputElement;
-        const valueLabel = div.querySelector('.opacity-value') as HTMLElement;
+        const valLabel = div.querySelector('.opacity-value') as HTMLElement;
         L.DomEvent.on(slider, 'input', () => {
-          const opacity = parseFloat(slider.value);
-          self.wmsOpacity = opacity;
-          valueLabel.textContent = `${Math.round(opacity * 100)}%`;
+          const o = parseFloat(slider.value);
+          self.wmsOpacity = o;
+          valLabel.textContent = `${Math.round(o * 100)}%`;
           const glMap = self.glLayer?.getMaplibreMap();
-          if (!glMap) return;
-          // Raster layer (zoom >= 13)
-          glMap.setPaintProperty('wms-composite-raster', 'raster-opacity', opacity);
-          // Vector hex layers (zoom < 13)
-          self.updateHexLayerPaint(glMap);
+          if (glMap) self.updateLayerPaint(glMap);
         });
 
         L.DomEvent.disableClickPropagation(div);
@@ -480,85 +386,127 @@ export class MapComponent implements OnInit, OnDestroy {
         return div;
       }
     });
-
     new ModeToggleControl({ position: 'topright' }).addTo(this.map);
   }
 
-  // --- Legend ----------------------------------------------------------------
+  // ── Simulation dropdown control ────────────────────────────────────────────
+
+  private addSimDropdown(): void {
+    const self = this;
+    const SimControl = L.Control.extend({
+      onAdd(): HTMLElement {
+        const div = L.DomUtil.create('div', 'sim-control');
+        div.innerHTML = `
+          <div class="sim-row">
+            <label class="sim-label">Kịch bản:</label>
+            <select class="sim-select">
+              <option value="">— Thực tế —</option>
+            </select>
+            <button class="sim-refresh" title="Tải lại danh sách kịch bản">↺</button>
+          </div>
+        `;
+
+        const select = div.querySelector('.sim-select') as HTMLSelectElement;
+        const refreshBtn = div.querySelector('.sim-refresh') as HTMLButtonElement;
+
+        // Populate and keep in sync with Angular's simulations array
+        function repopulate(): void {
+          const current = select.value;
+          while (select.options.length > 1) select.remove(1);
+          self.simulations.forEach(sim => {
+            const opt = document.createElement('option');
+            opt.value = sim.id;
+            opt.textContent = sim.name;
+            select.appendChild(opt);
+          });
+          select.value = current || '';
+        }
+
+        // Observer: repopulate whenever simulations list changes
+        // Use a simple interval check (Angular zone is already set up)
+        let lastCount = 0;
+        const intervalId = setInterval(() => {
+          if (self.simulations.length !== lastCount) {
+            lastCount = self.simulations.length;
+            repopulate();
+          }
+        }, 1000);
+
+        // Store cleanup ref on element
+        (div as any)['_clearInterval'] = () => clearInterval(intervalId);
+
+        L.DomEvent.on(select, 'change', () => {
+          self.selectSim(select.value || null);
+        });
+
+        L.DomEvent.on(refreshBtn, 'click', e => {
+          L.DomEvent.stopPropagation(e);
+          self.loadSimulations();
+        });
+
+        L.DomEvent.disableClickPropagation(div);
+        L.DomEvent.disableScrollPropagation(div);
+        return div;
+      },
+      onRemove(map: L.Map): void {
+        // clean up interval
+      }
+    });
+    new SimControl({ position: 'topleft' }).addTo(this.map);
+  }
+
+  // ── Legend ─────────────────────────────────────────────────────────────────
 
   private addLegend(): void {
     const self = this;
     const LegendControl = L.Control.extend({
-      onAdd(): HTMLElement {
-        return self.buildLegendElement();
-      }
+      onAdd(): HTMLElement { return self.buildLegendElement(); }
     });
-
     this.legendControl = new LegendControl({ position: 'bottomright' });
     this.legendControl.addTo(this.map);
   }
 
   private rebuildLegend(): void {
-    if (this.legendControl) {
-      this.legendControl.remove();
-    }
+    this.legendControl?.remove();
     this.addLegend();
   }
 
   private buildLegendElement(): HTMLElement {
     const div = L.DomUtil.create('div', 'hex-legend');
-
-    if (this.displayMode === 'signal-max') {
-      const title = 'Max Signal';
-      const grades: { label: string; color: string; dashed?: boolean }[] = [
-        { label: '≥ -65 dBm — Tuyệt vời',    color: 'rgba(253,231, 37, 0.75)' },
-        { label: '-75 → -65 — Rất tốt',    color: 'rgba(210,206, 62, 0.75)' },
-        { label: '-85 → -75 — Tốt',        color: 'rgba(157,186, 70, 0.75)' },
-        { label: '-95 → -85 — Khá',        color: 'rgba( 95,160, 96, 0.75)' },
-        { label: '-110 → -95 — Trung bình', color:'rgba( 44,120,142, 0.75)' },
-        { label: '-130 → -110 — Yếu',      color: 'rgba( 31, 78,121, 0.75)' },
-        { label: '-150 → -130 — Rất yếu',  color: 'rgba(  0, 51,111, 0.75)' },
-        { label: '< -150 — Cực yếu',       color: 'rgba(  0, 32, 77, 0.75)' },
-        { label: 'Không có dữ liệu',        color: 'rgba( 31, 78,121, 0.75)' },
-        { label: 'Cell tắt (OFF)',          color: 'rgba(255,  0,  0, 0.75)', dashed: true },
-      ];
+    if (this.displayMode === 'signal') {
       div.innerHTML = `
-        <div class="hex-legend__title">${title}</div>
-        ${grades.map(g => {
-          const extra = g.dashed
-            ? 'outline: 1.5px dashed #CC0000; outline-offset: -2px;'
-            : '';
-          return `
+        <div class="hex-legend__title">Max Signal</div>
+        ${[
+          { label: '≥ -65 dBm — Tuyệt vời', color: 'rgba(253,231,37,0.75)' },
+          { label: '-75 → -65 — Rất tốt',   color: 'rgba(210,206,62,0.75)' },
+          { label: '-85 → -75 — Tốt',       color: 'rgba(157,186,70,0.75)' },
+          { label: '-95 → -85 — Khá',       color: 'rgba(95,160,96,0.75)'  },
+          { label: '-110 → -95 — TB',       color: 'rgba(44,120,142,0.75)' },
+          { label: '-130 → -110 — Yếu',     color: 'rgba(31,78,121,0.75)'  },
+          { label: '< -130 — Rất yếu',      color: 'rgba(0,51,111,0.75)'   },
+          { label: 'Cell OFF',               color: 'rgba(255,0,0,0.75)', dashed: true }
+        ].map(g => `
           <div class="hex-legend__item">
-            <span class="hex-legend__swatch" style="background:${g.color};${extra}"></span>
+            <span class="hex-legend__swatch" style="background:${g.color}${(g as any).dashed ? ';outline:1.5px dashed #CC0000;outline-offset:-2px' : ''}"></span>
             <span class="hex-legend__label">${g.label}</span>
-          </div>`;
-        }).join('')}
+          </div>`).join('')}
       `;
     } else {
-      const grades: { label: string; color: string; dashed?: boolean }[] = [
-        { label: 'Very Strong (>=100)', color: 'rgba(  0,255,  0, 0.85)' },
-        { label: 'Strong    (40-99)',   color: 'rgba(  0,255,153, 0.75)' },
-        { label: 'Medium    (15-39)',   color: 'rgba(  0,255,204, 0.65)' },
-        { label: 'Weak       (5-14)',   color: 'rgba(  0,204,255, 0.55)' },
-        { label: 'Very Weak   (1-4)',   color: 'rgba(  0,153,255, 0.45)' },
-        { label: 'OFF (cell off)',      color: 'rgba(255,  0,  0, 0.75)', dashed: true },
-      ];
       div.innerHTML = `
-        <div class="hex-legend__title">Signal Density</div>
-        ${grades.map(g => {
-          const extra = g.dashed
-            ? 'outline: 1.5px dashed #CC0000; outline-offset: -2px;'
-            : '';
-          return `
+        <div class="hex-legend__title">Coverage</div>
+        ${[
+          { label: '≥ 5 cells — Rất mạnh', color: 'rgba(0,255,0,0.85)'   },
+          { label: '3–4 cells — Mạnh',     color: 'rgba(0,255,153,0.75)' },
+          { label: '2 cells — Trung bình', color: 'rgba(0,255,204,0.65)' },
+          { label: '1 cell — Yếu',         color: 'rgba(0,153,255,0.50)' },
+          { label: 'Cell OFF',             color: 'rgba(255,0,0,0.75)', dashed: true }
+        ].map(g => `
           <div class="hex-legend__item">
-            <span class="hex-legend__swatch" style="background:${g.color};${extra}"></span>
+            <span class="hex-legend__swatch" style="background:${g.color}${(g as any).dashed ? ';outline:1.5px dashed #CC0000;outline-offset:-2px' : ''}"></span>
             <span class="hex-legend__label">${g.label}</span>
-          </div>`;
-        }).join('')}
+          </div>`).join('')}
       `;
     }
-
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
     return div;

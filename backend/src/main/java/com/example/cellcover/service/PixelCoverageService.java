@@ -1,5 +1,6 @@
 package com.example.cellcover.service;
 
+import com.example.cellcover.repository.CellRepository;
 import com.example.cellcover.repository.RasterCoverageRepository;
 import it.geosolutions.imageioimpl.plugins.cog.DefaultCogImageInputStream;
 import org.geotools.coverage.grid.GridEnvelope2D;
@@ -78,6 +79,9 @@ public class PixelCoverageService {
     @Autowired
     private RasterCoverageRepository repository;
 
+    @Autowired
+    private CellRepository cellRepository;
+
     // ── geo-transform cache ───────────────────────────────────────────────────
 
     private record TiffMeta(double ulLon, double ulLat, double xRes, double yRes,
@@ -131,31 +135,42 @@ public class PixelCoverageService {
         MinioRangeReader.invalidateHeader(MinioStorageService.binaryKey(cellId));
     }
 
-    // ── public entry point ────────────────────────────────────────────────────
+    // ── public entry points ───────────────────────────────────────────────────
 
     /**
-     * Renders a 256×256 RGBA PNG tile showing cell coverage density.
-     *
-     * <p>Visible cells → density color (1 cell = blue, 5+ cells = green).
-     * Hidden cells → red, only where no visible cell overlaps.
+     * Real-state render: resolves on/off cells from MariaDB (real_status).
      */
     public byte[] renderTile(int z, int x, int y) throws Exception {
         double[] bbox = tileToWgs84Bbox(z, x, y);
         double lonMin = bbox[0], latMin = bbox[1], lonMax = bbox[2], latMax = bbox[3];
 
-        List<String> visibleIds = repository.findVisibleCellIdsInBbox(lonMin, latMin, lonMax, latMax);
-        List<String> hiddenIds  = repository.findHiddenCellIdsInBbox(lonMin, latMin, lonMax, latMax);
+        List<String> visibleIds = cellRepository.findOnCellIdsInBbox(lonMin, latMin, lonMax, latMax);
+        List<String> hiddenIds  = cellRepository.findOffCellIdsInBbox(lonMin, latMin, lonMax, latMax);
 
-        if (visibleIds.isEmpty() && hiddenIds.isEmpty()) return transparentPng();
+        return renderTile(z, x, y, visibleIds, hiddenIds);
+    }
+
+    /**
+     * Simulation-aware render: caller provides explicit on/off cell sets
+     * (resolved from Redis simulation cache by PixelTileController).
+     * COG bounds-check in readCogWindow filters out cells not covering this tile.
+     */
+    public byte[] renderTile(int z, int x, int y,
+                             java.util.Collection<String> onCells,
+                             java.util.Collection<String> offCells) throws Exception {
+        if (onCells.isEmpty() && offCells.isEmpty()) return transparentPng();
+
+        double[] bbox = tileToWgs84Bbox(z, x, y);
+        double lonMin = bbox[0], latMin = bbox[1], lonMax = bbox[2], latMax = bbox[3];
 
         int[]     density     = new int[TILE_SIZE * TILE_SIZE];
         boolean[] offCoverage = new boolean[TILE_SIZE * TILE_SIZE];
 
-        List<CompletableFuture<float[]>> visFutures = visibleIds.stream()
+        List<CompletableFuture<float[]>> visFutures = onCells.stream()
                 .map(id -> CompletableFuture.supplyAsync(
                         () -> readCogWindow(id, z, lonMin, latMin, lonMax, latMax), IO_POOL))
                 .toList();
-        List<CompletableFuture<float[]>> hidFutures = hiddenIds.stream()
+        List<CompletableFuture<float[]>> hidFutures = offCells.stream()
                 .map(id -> CompletableFuture.supplyAsync(
                         () -> readCogWindow(id, z, lonMin, latMin, lonMax, latMax), IO_POOL))
                 .toList();

@@ -1,25 +1,38 @@
 spring:
   datasource:
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:cellcover}?sslmode=disable
+    url: jdbc:mariadb://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:cellcover}?useUnicode=true&characterEncoding=UTF-8&serverTimezone=UTC&allowPublicKeyRetrieval=true&useSSL=false
     username: ${DB_USER:cellcover}
     password: ${DB_PASSWORD:cellcover}
-    driver-class-name: org.postgresql.Driver
+    driver-class-name: org.mariadb.jdbc.Driver
   jpa:
     hibernate:
-      ddl-auto: validate
+      ddl-auto: none
     open-in-view: false
     properties:
       hibernate:
-        dialect: org.hibernate.spatial.dialect.postgis.PostgisPG10Dialect
+        dialect: org.hibernate.dialect.MariaDBDialect
   flyway:
     enabled: true
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
 
 server:
   port: ${SERVER_PORT:8080}
 
 logging:
+  file:
+    name: /tmp/cellcover-backend.log
   level:
     org.springframework.web.servlet.DispatcherServlet: DEBUG
+    com.example.cellcover: DEBUG
 
 geoserver:
   url: ${GEOSERVER_URL:http://localhost:8081/geoserver}
@@ -36,3 +49,8 @@ cellcover:
     password: ${GEOSERVER_PASSWORD:geoserver}
     workspace: cellcover
     overlap-groups: 8
+
+clickhouse:
+  url: ${CLICKHOUSE_URL:jdbc:ch://localhost:8123/cellcover?compress=0}
+  username: ${CLICKHOUSE_USER:default}
+  password: ${CLICKHOUSE_PASSWORD:}

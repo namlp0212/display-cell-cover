@@ -21,8 +21,29 @@ public class CellImportProperties {
     public int getParallelThreads() { return parallelThreads; }
     public void setParallelThreads(int parallelThreads) { this.parallelThreads = parallelThreads; }
 
+    private Minio minio = new Minio();
+
     public Geoserver getGeoserver() { return geoserver; }
     public void setGeoserver(Geoserver geoserver) { this.geoserver = geoserver; }
+
+    public Minio getMinio() { return minio; }
+    public void setMinio(Minio minio) { this.minio = minio; }
+
+    public static class Minio {
+        private String endpoint  = "http://localhost:9000";
+        private String accessKey = "minioadmin";
+        private String secretKey = "minioadmin";
+        private String bucket    = "cellcover";
+
+        public String getEndpoint()              { return endpoint; }
+        public void setEndpoint(String e)        { this.endpoint = e; }
+        public String getAccessKey()             { return accessKey; }
+        public void setAccessKey(String k)       { this.accessKey = k; }
+        public String getSecretKey()             { return secretKey; }
+        public void setSecretKey(String k)       { this.secretKey = k; }
+        public String getBucket()                { return bucket; }
+        public void setBucket(String b)          { this.bucket = b; }
+    }
 
     public static class Geoserver {
         private String url           = "http://localhost:8081/geoserver";
