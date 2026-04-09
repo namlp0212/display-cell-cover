@@ -1,57 +1,445 @@
-#map {
+// ── Root layout ───────────────────────────────────────────────────────────────
+.map-layout {
+  display: flex;
   width: 100%;
   height: 100%;
+  overflow: hidden;
+}
+
+// ── Map area ──────────────────────────────────────────────────────────────────
+#map {
+  flex: 1;
+  min-width: 0;
   position: relative;
 }
 
-// ── Hex heatmap legend ────────────────────────────────────────────────────────
-.hex-legend {
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(4px);
-  border-radius: 6px;
-  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.25);
-  padding: 10px 14px;
-  font-size: 12px;
-  line-height: 1.4;
-  min-width: 170px;
+// ── Left sidebar ──────────────────────────────────────────────────────────────
+.tree-sidebar {
+  width: 300px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fafafa;
+  border-right: 1px solid rgba(0, 0, 0, 0.12);
+  overflow: hidden;
 
-  &__title {
-    font-weight: 700;
-    font-size: 12px;
-    margin-bottom: 6px;
-    color: #222;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-  }
-
-  &__item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 4px;
-
-    &:last-child { margin-bottom: 0; }
-  }
-
-  &__swatch {
-    display: inline-block;
-    width: 14px;
-    height: 14px;
-    border-radius: 3px;
-    // White base so the semi-transparent rgba color reads as it does over the
-    // light Google basemap, giving the legend an accurate visual preview.
-    background-color: #fff;
-    border: 1px solid rgba(0, 0, 0, 0.18);
-    flex-shrink: 0;
-  }
-
-  &__label {
-    color: #444;
-    white-space: nowrap;
+  &.tree-sidebar--closed {
+    display: none;
   }
 }
 
-// ── Loading overlay ───────────────────────────────────────────────────────────
+.ts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 9px;
+  background: rgba(42, 122, 42, 0.07);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.10);
+  flex-shrink: 0;
+}
+
+.ts-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a4a1a;
+}
+
+.ts-close-btn {
+  border: none;
+  background: transparent;
+  font-size: 14px;
+  cursor: pointer;
+  color: #888;
+  padding: 0 2px;
+  line-height: 1;
+  &:hover { color: #333; }
+}
+
+// ── Search row ────────────────────────────────────────────────────────────────
+.ts-search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  flex-shrink: 0;
+  background: #fff;
+}
+
+.ts-search-input {
+  flex: 1;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 5px;
+  padding: 5px 9px;
+  font-size: 12px;
+  outline: none;
+  background: #fff;
+  min-width: 0;
+
+  &:focus {
+    border-color: #2a7a2a;
+    box-shadow: 0 0 0 2px rgba(42, 122, 42, 0.12);
+  }
+}
+
+.ts-clear-btn {
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  color: #aaa;
+  cursor: pointer;
+  padding: 0 2px;
+  flex-shrink: 0;
+  line-height: 1;
+  &:hover { color: #555; }
+}
+
+.ts-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(42, 122, 42, 0.2);
+  border-top-color: #2a7a2a;
+  border-radius: 50%;
+  animation: sidebar-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes sidebar-spin {
+  to { transform: rotate(360deg); }
+}
+
+// ── Scenario toolbar ──────────────────────────────────────────────────────────
+.ts-toolbar {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  flex-shrink: 0;
+}
+
+.ts-scenario-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  background: rgba(234, 179, 8, 0.08);
+  border-bottom: 1px solid rgba(234, 179, 8, 0.25);
+  flex-shrink: 0;
+}
+
+.ts-scenario-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ts-scenario-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #92400e;
+}
+
+.ts-spinner--scenario {
+  border-color: rgba(146, 64, 14, 0.2);
+  border-top-color: #92400e;
+}
+
+.ts-scenario-applying {
+  font-size: 11px;
+  color: #92400e;
+  opacity: 0.75;
+}
+
+.ts-scenario-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ts-scenario-error {
+  padding: 5px 10px;
+  font-size: 11px;
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.08);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.2);
+  flex-shrink: 0;
+}
+
+// ── Shared buttons ────────────────────────────────────────────────────────────
+.ts-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &--create {
+    background: #2a7a2a;
+    color: #fff;
+    border-color: #2a7a2a;
+    width: 100%;
+    padding: 5px;
+    font-size: 12px;
+    &:hover { background: #236423; }
+  }
+
+  &--save {
+    background: #dcfce7;
+    color: #15803d;
+    border-color: #86efac;
+    &:hover { background: #bbf7d0; }
+  }
+
+  &--cancel {
+    background: #fee2e2;
+    color: #b91c1c;
+    border-color: #fca5a5;
+    &:hover { background: #fecaca; }
+  }
+}
+
+// ── Scrollable body ───────────────────────────────────────────────────────────
+.ts-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+// ── Search results ────────────────────────────────────────────────────────────
+.ts-count {
+  font-size: 11px;
+  color: #888;
+  padding: 6px 12px 2px;
+}
+
+.ts-result-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+
+.ts-result-item {
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+
+  &:hover { background: rgba(0, 0, 0, 0.02); }
+
+  &.ts-result--off .ts-cell-id {
+    color: #b91c1c;
+    text-decoration: line-through;
+  }
+}
+
+.ts-result-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.ts-cell-id {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1a1a1a;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+}
+
+.ts-net-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 8px;
+  flex-shrink: 0;
+
+  &.net-4g { background: #dbeafe; color: #1d4ed8; }
+  &.net-5g { background: #dcfce7; color: #15803d; }
+  &.net-3g { background: #fef3c7; color: #b45309; }
+  &.net-2g { background: #f3f4f6; color: #6b7280; }
+}
+
+.ts-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+
+  &.dot-on  { background: #22c55e; }
+  &.dot-off { background: #ef4444; }
+}
+
+.ts-result-meta {
+  font-size: 11px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ts-hint {
+  padding: 16px 14px;
+  font-size: 12px;
+  color: #888;
+  text-align: center;
+  font-style: italic;
+}
+
+// ── Tree nodes ────────────────────────────────────────────────────────────────
+.ctp-dept-block {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  &:last-child { border-bottom: none; }
+}
+
+.ctp-station-block {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+  &:last-child { border-bottom: none; }
+}
+
+.ctp-raster-block {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.03);
+  &:last-child { border-bottom: none; }
+}
+
+.ctp-node {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  cursor: pointer;
+  transition: background 0.1s;
+
+  &:hover { background: rgba(42, 122, 42, 0.05); }
+
+  &--dept {
+    font-size: 12px;
+    font-weight: 700;
+    color: #1a3a1a;
+  }
+
+  &--station {
+    font-size: 12px;
+    font-weight: 600;
+    color: #2a4a2a;
+  }
+
+  &--raster { cursor: pointer; }
+
+  &--cell {
+    cursor: default;
+    &:hover { background: transparent; }
+  }
+
+  &.node--scenario-off {
+    background: rgba(239, 68, 68, 0.05);
+
+    .ctp-label { color: #b91c1c; }
+  }
+}
+
+.ctp-arrow {
+  font-size: 10px;
+  color: #888;
+  width: 10px;
+  flex-shrink: 0;
+}
+
+.ctp-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.ctp-label {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+
+  &--raster {
+    font-size: 11px;
+    color: #555;
+    font-weight: 400;
+  }
+
+  &--cell {
+    font-size: 11px;
+    color: #333;
+    font-weight: 400;
+    font-family: monospace;
+
+    &.cell-off {
+      color: #b91c1c;
+      text-decoration: line-through;
+    }
+  }
+}
+
+.ctp-cell-count {
+  font-size: 10px;
+  color: #aaa;
+  flex-shrink: 0;
+  margin-left: 2px;
+}
+
+.ctp-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+
+  &.dot-on  { background: #22c55e; }
+  &.dot-off { background: #ef4444; }
+}
+
+.ctp-net-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 8px;
+  flex-shrink: 0;
+
+  &.net-4g { background: #dbeafe; color: #1d4ed8; }
+  &.net-5g { background: #dcfce7; color: #15803d; }
+  &.net-3g { background: #fef3c7; color: #b45309; }
+  &.net-2g { background: #f3f4f6; color: #6b7280; }
+}
+
+// ── Scenario toggle button ─────────────────────────────────────────────────────
+.sc-toggle {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid #86efac;
+  cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+  background: #dcfce7;
+  color: #15803d;
+  transition: all 0.12s;
+  line-height: 1.4;
+
+  &:hover:not(:disabled) { opacity: 0.75; }
+
+  &.sc-toggle--off {
+    background: #fee2e2;
+    color: #b91c1c;
+    border-color: #fca5a5;
+  }
+
+  &.sc-toggle--locked,
+  &:disabled {
+    background: #f3f4f6;
+    color: #9ca3af;
+    border-color: #e5e7eb;
+    cursor: not-allowed;
+  }
+}
+
+// ── Loading overlay (kept for potential future use) ───────────────────────────
 .map-loading {
   position: absolute;
   inset: 0;
@@ -83,7 +471,3 @@
 @keyframes map-spin {
   to { transform: rotate(360deg); }
 }
-
-// Leaflet control styles (hex-legend, mode-toggle, zoom-badge) are in
-// global styles.scss — Angular ViewEncapsulation does not apply component
-// styles to dynamically created Leaflet DOM elements.

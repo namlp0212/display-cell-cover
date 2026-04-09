@@ -35,6 +35,17 @@ public class Simulation {
     @Column(name = "ended_at")
     private LocalDateTime endedAt;
 
+    // V23 fields
+    @Column(name = "ephemeral", nullable = false)
+    private boolean ephemeral = false;
+
+    @Column(name = "updated_at")
+    private LocalDateTime updatedAt;
+
+    // V28 field
+    @Column(name = "baseline_sim_id", length = 36)
+    private String baselineSimId;
+
     @JsonIgnore
     @OneToMany(mappedBy = "simulationId", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<SimulationOverride> overrides = new ArrayList<>();
@@ -47,6 +58,14 @@ public class Simulation {
         if (createdAt == null) {
             createdAt = LocalDateTime.now();
         }
+        if (updatedAt == null) {
+            updatedAt = LocalDateTime.now();
+        }
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
     }
 
     public enum SimulationStatus { active, ended }
@@ -71,6 +90,15 @@ public class Simulation {
 
     public LocalDateTime getEndedAt() { return endedAt; }
     public void setEndedAt(LocalDateTime endedAt) { this.endedAt = endedAt; }
+
+    public boolean isEphemeral() { return ephemeral; }
+    public void setEphemeral(boolean ephemeral) { this.ephemeral = ephemeral; }
+
+    public LocalDateTime getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }
+
+    public String getBaselineSimId() { return baselineSimId; }
+    public void setBaselineSimId(String baselineSimId) { this.baselineSimId = baselineSimId; }
 
     public List<SimulationOverride> getOverrides() { return overrides; }
     public void setOverrides(List<SimulationOverride> overrides) { this.overrides = overrides; }

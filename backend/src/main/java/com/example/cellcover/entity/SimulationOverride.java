@@ -1,6 +1,7 @@
 package com.example.cellcover.entity;
 
 import jakarta.persistence.*;
+import org.springframework.data.domain.Persistable;
 
 import java.io.Serializable;
 import java.util.Objects;
@@ -8,7 +9,7 @@ import java.util.Objects;
 @Entity
 @Table(name = "simulation_overrides")
 @IdClass(SimulationOverride.PK.class)
-public class SimulationOverride {
+public class SimulationOverride implements Persistable<SimulationOverride.PK> {
 
     @Id
     @Column(name = "simulation_id", length = 36)
@@ -20,6 +21,21 @@ public class SimulationOverride {
 
     @Column(name = "forced_status", nullable = false)
     private boolean forcedStatus = false;
+
+    /** True for newly created instances so Hibernate calls persist() instead of merge().
+     *  Without this, composite-PK entities trigger a SELECT before every INSERT. */
+    @Transient
+    private boolean isNew = true;
+
+    @Override
+    public PK getId() { return new PK(simulationId, cellId); }
+
+    @Override
+    public boolean isNew() { return isNew; }
+
+    @PostPersist
+    @PostLoad
+    void markNotNew() { this.isNew = false; }
 
     public String getSimulationId() { return simulationId; }
     public void setSimulationId(String simulationId) { this.simulationId = simulationId; }

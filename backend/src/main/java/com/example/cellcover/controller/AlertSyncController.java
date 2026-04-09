@@ -4,6 +4,7 @@ import com.example.cellcover.dto.AlertSyncRequest;
 import com.example.cellcover.entity.Cell;
 import com.example.cellcover.repository.CellRepository;
 import com.example.cellcover.service.CellCacheService;
+import com.example.cellcover.service.ClickHouseDictRefreshService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -25,13 +26,16 @@ public class AlertSyncController {
 
     private final CellRepository cellRepo;
     private final CellCacheService cacheService;
+    private final ClickHouseDictRefreshService dictRefresh;
     private final SimpMessagingTemplate messagingTemplate;
 
     public AlertSyncController(CellRepository cellRepo,
                                CellCacheService cacheService,
+                               ClickHouseDictRefreshService dictRefresh,
                                SimpMessagingTemplate messagingTemplate) {
         this.cellRepo = cellRepo;
         this.cacheService = cacheService;
+        this.dictRefresh = dictRefresh;
         this.messagingTemplate = messagingTemplate;
     }
 
@@ -49,6 +53,9 @@ public class AlertSyncController {
 
         // Invalidate real-state cache so next tile request reloads from DB
         cacheService.invalidateReal();
+
+        // Trigger async ClickHouse dictionary reload so tile queries reflect new state immediately
+        dictRefresh.reloadCellStateDict();
 
         // Push event to all connected WebSocket clients
         messagingTemplate.convertAndSend("/topic/cell-status", Map.of(
@@ -80,6 +87,7 @@ public class AlertSyncController {
         }
 
         cacheService.invalidateReal();
+        dictRefresh.reloadCellStateDict();
 
         messagingTemplate.convertAndSend("/topic/cell-status-batch", Map.of(
                 "updated", updated,

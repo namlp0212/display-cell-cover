@@ -34,6 +34,22 @@ public class Cell {
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
+    // V18 fields
+    @Column(name = "raster_id")
+    private Long rasterId;
+
+    @Column(name = "row_status")
+    private int rowStatus = 1;
+
+    @Column(name = "deleted_at")
+    private LocalDateTime deletedAt;
+
+    @Column(name = "nims_updated_at")
+    private LocalDateTime nimsUpdatedAt;
+
+    @Column(name = "updated_at")
+    private LocalDateTime updatedAt;
+
     @PrePersist
     protected void onCreate() {
         if (createdAt == null) {
@@ -64,4 +80,19 @@ public class Cell {
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+
+    public Long getRasterId() { return rasterId; }
+    public void setRasterId(Long rasterId) { this.rasterId = rasterId; }
+
+    public int getRowStatus() { return rowStatus; }
+    public void setRowStatus(int rowStatus) { this.rowStatus = rowStatus; }
+
+    public LocalDateTime getDeletedAt() { return deletedAt; }
+    public void setDeletedAt(LocalDateTime deletedAt) { this.deletedAt = deletedAt; }
+
+    public LocalDateTime getNimsUpdatedAt() { return nimsUpdatedAt; }
+    public void setNimsUpdatedAt(LocalDateTime nimsUpdatedAt) { this.nimsUpdatedAt = nimsUpdatedAt; }
+
+    public LocalDateTime getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }
 }

@@ -1,6 +1,7 @@
 package com.example.cellcover.controller;
 
 import com.example.cellcover.dto.CellImportResult;
+import com.example.cellcover.service.CellCacheService;
 import com.example.cellcover.service.CellImportService;
 import com.example.cellcover.service.H3IndexPipelineService;
 import com.example.cellcover.service.HexCoverageService;
@@ -16,13 +17,26 @@ public class AdminController {
     private final CellImportService       cellImportService;
     private final HexCoverageService      hexCoverageService;
     private final H3IndexPipelineService  pipelineService;
+    private final CellCacheService        cacheService;
 
     public AdminController(CellImportService cellImportService,
                            HexCoverageService hexCoverageService,
-                           H3IndexPipelineService pipelineService) {
+                           H3IndexPipelineService pipelineService,
+                           CellCacheService cacheService) {
         this.cellImportService  = cellImportService;
         this.hexCoverageService = hexCoverageService;
         this.pipelineService    = pipelineService;
+        this.cacheService       = cacheService;
+    }
+
+    /** Rebuilds Redis real-state + network-type caches from DB. */
+    @PostMapping("/rebuild-cache")
+    public Map<String, Object> rebuildCache() {
+        cacheService.invalidateReal();
+        cacheService.invalidateNetworkCache();
+        cacheService.getRealOnCells();      // trigger lazy load
+        cacheService.buildNetworkCache();
+        return Map.of("status", "ok");
     }
 
     @PostMapping("/sync-cells")

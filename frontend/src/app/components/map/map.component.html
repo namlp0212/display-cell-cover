@@ -1,3 +1,209 @@
-<div id="map">
-  <div id="zoom-badge" class="zoom-badge">Z12.0 — H3 res9</div>
+<div class="map-layout">
+
+  <!-- ─── Left sidebar: search + tree + scenario ──────────────────────────── -->
+  <div class="tree-sidebar" [class.tree-sidebar--closed]="!treeOpen">
+
+    <div class="ts-header">
+      <span class="ts-title">Cây đơn vị</span>
+      <button class="ts-close-btn" (click)="toggleTreePanel()" title="Đóng">✕</button>
+    </div>
+
+    <!-- Search bar -->
+    <div class="ts-search-row">
+      <input class="ts-search-input"
+             type="text"
+             placeholder="Tìm cell, trạm..."
+             [ngModel]="searchQuery"
+             (ngModelChange)="onSearchInput($event)"
+             autocomplete="off" />
+      @if (searchLoading) {
+        <span class="ts-spinner"></span>
+      }
+      @if (searchQuery) {
+        <button class="ts-clear-btn" (click)="onSearchInput('')">✕</button>
+      }
+    </div>
+
+    <!-- Scenario toolbar (hidden while searching) -->
+    @if (!searchQuery.trim()) {
+      @if (!scenarioMode) {
+        <div class="ts-toolbar">
+          <button class="ts-btn ts-btn--create" (click)="enterScenarioMode()">+ Tạo kịch bản</button>
+        </div>
+      } @else {
+        <div class="ts-scenario-bar">
+          <div class="ts-scenario-status">
+            <span class="ts-scenario-label">📋 Đang tạo kịch bản</span>
+            @if (scenarioApplying) {
+              <span class="ts-spinner ts-spinner--scenario"></span>
+              <span class="ts-scenario-applying">Đang cập nhật...</span>
+            }
+          </div>
+          <div class="ts-scenario-actions">
+            <button class="ts-btn ts-btn--save"
+                    [disabled]="scenarioApplying"
+                    (click)="saveScenario()">💾 Lưu</button>
+            <button class="ts-btn ts-btn--cancel"
+                    [disabled]="scenarioApplying"
+                    (click)="cancelScenarioMode()">Hủy</button>
+          </div>
+        </div>
+        @if (scenarioError) {
+          <div class="ts-scenario-error">⚠ {{ scenarioError }}</div>
+        }
+      }
+    }
+
+    <!-- Scrollable body -->
+    <div class="ts-body">
+
+      @if (searchQuery.trim()) {
+        <!-- Search results -->
+        @if (searchResults.length > 0) {
+          <div class="ts-count">{{ searchTotal }} kết quả</div>
+          <ul class="ts-result-list">
+            @for (cell of searchResults; track cell.cellId) {
+              <li class="ts-result-item" [ngClass]="{'ts-result--off': !cell.realStatus}">
+                <div class="ts-result-main">
+                  <span class="ts-cell-id">{{ cell.cellId }}</span>
+                  <span class="ts-net-badge net-{{ cell.networkType.toLowerCase() }}">{{ cell.networkType }}</span>
+                  <span class="ts-dot" [ngClass]="cell.realStatus ? 'dot-on' : 'dot-off'"></span>
+                </div>
+                <div class="ts-result-meta">
+                  <span>{{ cell.stationName || cell.stationCode }}</span>
+                  @if (cell.locationName) { <span>&nbsp;· {{ cell.locationName }}</span> }
+                </div>
+              </li>
+            }
+          </ul>
+        } @else if (!searchLoading) {
+          <div class="ts-hint">Không tìm thấy "{{ searchQuery }}"</div>
+        }
+
+      } @else {
+        <!-- Hierarchy tree -->
+        @if (treeLoading) {
+          <div class="ts-hint">Đang tải...</div>
+        }
+        <ng-container *ngTemplateOutlet="deptTree; context: { $implicit: treeData, depth: 0 }"></ng-container>
+      }
+
+    </div>
+  </div>
+
+  <!-- ─── Map area ──────────────────────────────────────────────────────────── -->
+  <div id="map" class="map-area">
+    <div id="zoom-badge" class="zoom-badge">Z12.0 — H3 res9</div>
+  </div>
+
+  <!-- Recursive dept template -->
+  <ng-template #deptTree let-depts let-depth="depth">
+    @for (dept of depts; track dept.deptId) {
+      <div class="ctp-dept-block">
+
+        <div class="ctp-node ctp-node--dept"
+             [style.padding-left.px]="10 + depth * 12"
+             [class.node--scenario-off]="scenarioMode && isDeptOff(dept.deptId)"
+             (click)="toggleDept(dept.deptId)">
+          <span class="ctp-arrow">{{ expandedDepts.has(dept.deptId) ? '▾' : '▸' }}</span>
+          <span class="ctp-icon">{{ depth === 0 ? '🏛' : depth === 1 ? '🏢' : '📍' }}</span>
+          <span class="ctp-label">{{ dept.deptName }}</span>
+          @if (scenarioMode) {
+            <button class="sc-toggle"
+                    [class.sc-toggle--off]="isDeptOff(dept.deptId)"
+                    [class.sc-toggle--locked]="isDeptAncestorOff(dept.deptId)"
+                    [disabled]="isDeptAncestorOff(dept.deptId)"
+                    (click)="$event.stopPropagation(); toggleScenarioDept(dept.deptId)">
+              {{ isDeptOff(dept.deptId) ? 'OFF' : 'ON' }}
+            </button>
+          }
+        </div>
+
+        @if (expandedDepts.has(dept.deptId)) {
+          @if (dept.children && dept.children.length > 0) {
+            <ng-container *ngTemplateOutlet="deptTree; context: { $implicit: dept.children, depth: depth + 1 }"></ng-container>
+          }
+          @if (dept.stations && dept.stations.length > 0) {
+            @for (station of dept.stations; track station.stationId) {
+              <div class="ctp-station-block">
+
+                <div class="ctp-node ctp-node--station"
+                     [style.padding-left.px]="10 + (depth + 1) * 12"
+                     [class.node--scenario-off]="scenarioMode && isStationOff(station.stationId)"
+                     (click)="toggleStation(station.stationId)">
+                  <span class="ctp-arrow">{{ expandedStations.has(station.stationId) ? '▾' : '▸' }}</span>
+                  <span class="ctp-icon">📡</span>
+                  <span class="ctp-label">{{ station.stationCode }}</span>
+                  @if (scenarioMode) {
+                    <button class="sc-toggle"
+                            [class.sc-toggle--off]="isStationOff(station.stationId)"
+                            [class.sc-toggle--locked]="isStationAncestorOff(station.stationId)"
+                            [disabled]="isStationAncestorOff(station.stationId)"
+                            (click)="$event.stopPropagation(); toggleScenarioStation(station.stationId)">
+                      {{ isStationOff(station.stationId) ? 'OFF' : 'ON' }}
+                    </button>
+                  }
+                </div>
+
+                @if (expandedStations.has(station.stationId)) {
+                  @for (raster of station.rasters; track raster.rasterId) {
+                    <div class="ctp-raster-block">
+
+                      <div class="ctp-node ctp-node--raster"
+                           [style.padding-left.px]="10 + (depth + 2) * 12"
+                           [class.node--scenario-off]="scenarioMode && isRasterOff(raster.rasterId)"
+                           (click)="toggleRaster(raster.rasterId)">
+                        <span class="ctp-arrow">{{ expandedRasters.has(raster.rasterId) ? '▾' : '▸' }}</span>
+                        <span class="ctp-net-badge net-{{ raster.networkType.toLowerCase() }}">{{ raster.networkType }}</span>
+                        <span class="ctp-label ctp-label--raster">{{ raster.rasterName }}</span>
+                        <span class="ctp-cell-count">({{ raster.cells.length }})</span>
+                        @if (scenarioMode) {
+                          <button class="sc-toggle"
+                                  [class.sc-toggle--off]="isRasterOff(raster.rasterId)"
+                                  [class.sc-toggle--locked]="isRasterAncestorOff(raster.rasterId)"
+                                  [disabled]="isRasterAncestorOff(raster.rasterId)"
+                                  (click)="$event.stopPropagation(); toggleScenarioRaster(raster.rasterId)">
+                            {{ isRasterOff(raster.rasterId) ? 'OFF' : 'ON' }}
+                          </button>
+                        }
+                      </div>
+
+                      @if (expandedRasters.has(raster.rasterId)) {
+                        @for (cell of raster.cells; track cell.cellId) {
+                          <div class="ctp-node ctp-node--cell"
+                               [style.padding-left.px]="10 + (depth + 3) * 12"
+                               [class.node--scenario-off]="scenarioMode && isCellOff(cell.cellId, raster.rasterId)">
+                            <span class="ctp-status-dot"
+                                  [class.dot-on]="scenarioMode ? !isCellOff(cell.cellId, raster.rasterId) : cell.realStatus"
+                                  [class.dot-off]="scenarioMode ? isCellOff(cell.cellId, raster.rasterId) : !cell.realStatus"></span>
+                            <span class="ctp-label ctp-label--cell"
+                                  [class.cell-off]="scenarioMode ? isCellOff(cell.cellId, raster.rasterId) : !cell.realStatus">
+                              {{ cell.cellId }}
+                            </span>
+                            @if (scenarioMode) {
+                              <button class="sc-toggle"
+                                      [class.sc-toggle--off]="isCellOff(cell.cellId, raster.rasterId)"
+                                      [class.sc-toggle--locked]="isCellAncestorOff(raster.rasterId)"
+                                      [disabled]="isCellAncestorOff(raster.rasterId)"
+                                      (click)="$event.stopPropagation(); toggleScenarioCell(cell.cellId, raster.rasterId)">
+                                {{ isCellOff(cell.cellId, raster.rasterId) ? 'OFF' : 'ON' }}
+                              </button>
+                            }
+                          </div>
+                        }
+                      }
+
+                    </div>
+                  }
+                }
+
+              </div>
+            }
+          }
+        }
+
+      </div>
+    }
+  </ng-template>
+
 </div>

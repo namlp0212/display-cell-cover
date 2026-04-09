@@ -6,7 +6,7 @@ html, body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
-// ── Hex heatmap legend ────────────────────────────────────────────────────────
+// ── Hex heatmap legend (Leaflet control — must be global) ─────────────────────
 .hex-legend {
   background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(4px);
@@ -66,7 +66,7 @@ html, body {
   &::before { border-top-color: rgba(183, 28, 28, 0.92); }
 }
 
-// ── Display mode toggle ───────────────────────────────────────────────────────
+// ── Display mode toggle (Leaflet control) ─────────────────────────────────────
 .mode-toggle {
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(4px);
@@ -76,7 +76,6 @@ html, body {
   flex-direction: column;
   overflow: hidden;
   margin-top: 4px;
-
 }
 
 .mode-btn-row {
@@ -123,21 +122,17 @@ html, body {
   transition: background-color 0.2s, color 0.2s;
   white-space: nowrap;
 
-  &:hover {
-    background: rgba(0, 0, 0, 0.06);
-  }
+  &:hover { background: rgba(0, 0, 0, 0.06); }
 
   &.active {
     background: #2a7a2a;
     color: #fff;
   }
 
-  & + & {
-    border-left: 1px solid rgba(0, 0, 0, 0.12);
-  }
+  & + & { border-left: 1px solid rgba(0, 0, 0, 0.12); }
 }
 
-// ── Simulation dropdown control ───────────────────────────────────────────────
+// ── Simulation dropdown control (Leaflet) ─────────────────────────────────────
 .sim-control {
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(4px);
@@ -195,4 +190,113 @@ html, body {
   color: #fff;
   background: #2a7a2a;
   pointer-events: none;
+}
+
+// ── Network type filter chips (Leaflet control) ───────────────────────────────
+.network-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 6px;
+  border-top: 1px solid rgba(0, 0, 0, 0.10);
+  flex-wrap: wrap;
+}
+
+.net-filter-label {
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+  margin-right: 2px;
+}
+
+.net-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  background: #f5f5f5;
+  color: #666;
+  user-select: none;
+  transition: all 0.15s;
+
+  &.active {
+    background: #2a7a2a;
+    color: #fff;
+    border-color: #2a7a2a;
+  }
+
+  &:hover:not(.active) {
+    background: rgba(42, 122, 42, 0.12);
+    border-color: #2a7a2a;
+    color: #2a7a2a;
+  }
+}
+
+// ── Session row in sim-control ────────────────────────────────────────────────
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid rgba(0, 0, 0, 0.10);
+  flex-wrap: wrap;
+}
+
+.session-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #b45309;
+  white-space: nowrap;
+}
+
+.session-cells-count {
+  font-size: 11px;
+  color: #555;
+  flex: 1;
+}
+
+.session-reset-btn,
+.session-save-btn {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.session-reset-btn {
+  background: #fee2e2;
+  color: #b91c1c;
+  &:hover { background: #fecaca; }
+}
+
+.session-save-btn {
+  background: #dcfce7;
+  color: #15803d;
+  &:hover { background: #bbf7d0; }
+}
+
+// ── Tree sidebar toggle button (Leaflet control) ──────────────────────────────
+.tree-btn-control {
+  margin-top: 4px;
+}
+
+.tree-open-btn {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(4px);
+  border: none;
+  border-radius: 6px;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.25);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #333;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover { background: #fff; color: #2a7a2a; }
 }

@@ -18,16 +18,20 @@ import java.util.*;
  *   effective_cells:real:off      → Set of off cell_ids
  *   effective_cells:sim:{id}:on   → Set of on cell_ids for a simulation
  *   effective_cells:sim:{id}:off  → Set of off cell_ids for a simulation
- *   tile_cache:{z}:{x}:{y}:{mode}:{simId} → bytes (MVT, TTL 60s)
+ *   cells:network:{networkType}   → Set of cell_ids for a given network type
+ *   tile_cache:{z}:{x}:{y}:{mode}:{networkTypesHash}:{simId} → bytes (MVT, TTL 60s)
  */
 @Service
 public class CellCacheService {
 
     private static final Logger log = LoggerFactory.getLogger(CellCacheService.class);
 
-    private static final String KEY_REAL_ON  = "effective_cells:real";
-    private static final String KEY_REAL_OFF = "effective_cells:real:off";
-    private static final Duration SIM_TTL    = Duration.ofHours(24);
+    private static final String KEY_REAL_ON       = "effective_cells:real";
+    private static final String KEY_REAL_OFF      = "effective_cells:real:off";
+    private static final String KEY_NETWORK_PREFIX = "cells:network:";
+    private static final Duration SIM_TTL         = Duration.ofHours(24);
+
+    private static final String[] KNOWN_NETWORK_TYPES = {"2G", "3G", "4G", "5G"};
 
     private final RedisTemplate<String, String> redis;
     private final CellRepository cellRepo;
@@ -77,7 +81,47 @@ public class CellCacheService {
     public void invalidateReal() {
         redis.delete(KEY_REAL_ON);
         redis.delete(KEY_REAL_OFF);
-        invalidateTileCache("*:*:*:*:null");
+        invalidateTileCache("*:*:*:*:*:null");
+    }
+
+    // ── Network type cache ────────────────────────────────────────────────────
+
+    /**
+     * Build per-network-type cell sets in Redis.
+     * Reads JOIN of cells + infra_rasters from DB and groups by network_type.
+     */
+    public void buildNetworkCache() {
+        List<Object[]> rows = cellRepo.findAllCellNetworkTypes();
+        Map<String, Set<String>> byNetwork = new HashMap<>();
+        for (Object[] row : rows) {
+            String cellId = (String) row[0];
+            String networkType = (String) row[1];
+            if (networkType != null) {
+                byNetwork.computeIfAbsent(networkType.toUpperCase(), k -> new HashSet<>()).add(cellId);
+            }
+        }
+
+        for (Map.Entry<String, Set<String>> entry : byNetwork.entrySet()) {
+            String key = KEY_NETWORK_PREFIX + entry.getKey();
+            redis.delete(key);
+            if (!entry.getValue().isEmpty()) {
+                redis.opsForSet().add(key, entry.getValue().toArray(String[]::new));
+            }
+        }
+        log.info("Built network cache: {} network types, {} total entries",
+                byNetwork.size(), rows.size());
+    }
+
+    public Set<String> getNetworkCells(String networkType) {
+        String key = KEY_NETWORK_PREFIX + networkType.toUpperCase();
+        Set<String> members = redis.opsForSet().members(key);
+        return members != null ? members : Collections.emptySet();
+    }
+
+    public void invalidateNetworkCache() {
+        for (String nt : KNOWN_NETWORK_TYPES) {
+            redis.delete(KEY_NETWORK_PREFIX + nt);
+        }
     }
 
     // ── Simulation state ──────────────────────────────────────────────────────
@@ -127,7 +171,8 @@ public class CellCacheService {
 
     public Set<String> getSimOffCells(String simId) {
         Set<String> cached = redis.opsForSet().members(simOffKey(simId));
-        if (cached != null) return cached;
+        // Redis returns empty Set (not null) when key is absent — must also check isEmpty()
+        if (cached != null && !cached.isEmpty()) return cached;
         buildSimCache(simId);
         Set<String> result = redis.opsForSet().members(simOffKey(simId));
         return result != null ? result : Collections.emptySet();
@@ -136,19 +181,30 @@ public class CellCacheService {
     public void invalidateSim(String simId) {
         redis.delete(simOnKey(simId));
         redis.delete(simOffKey(simId));
-        invalidateTileCache("*:*:*:*:" + simId);
+        invalidateTileCache("*:*:*:*:*:" + simId);
+        invalidateTileCache("*:*:*:*:*:" + simId + ":b"); // baseline tile cache
     }
 
     // ── Tile cache ────────────────────────────────────────────────────────────
 
+    /** Legacy method kept for backward compatibility — uses "all" as networkTypesHash. */
     public byte[] getTileCache(int z, int x, int y, String mode, String simId) {
-        String key = tileCacheKey(z, x, y, mode, simId);
+        return getTileCache(z, x, y, mode, "all", simId);
+    }
+
+    public byte[] getTileCache(int z, int x, int y, String mode, String networkTypesHash, String simId) {
+        String key = tileCacheKey(z, x, y, mode, networkTypesHash, simId);
         String val = redis.opsForValue().get(key);
         return val != null ? Base64.getDecoder().decode(val) : null;
     }
 
+    /** Legacy method kept for backward compatibility — uses "all" as networkTypesHash. */
     public void putTileCache(int z, int x, int y, String mode, String simId, byte[] mvt) {
-        String key = tileCacheKey(z, x, y, mode, simId);
+        putTileCache(z, x, y, mode, "all", simId, mvt);
+    }
+
+    public void putTileCache(int z, int x, int y, String mode, String networkTypesHash, String simId, byte[] mvt) {
+        String key = tileCacheKey(z, x, y, mode, networkTypesHash, simId);
         redis.opsForValue().set(key, Base64.getEncoder().encodeToString(mvt), Duration.ofSeconds(60));
     }
 
@@ -164,7 +220,7 @@ public class CellCacheService {
     private static String simOnKey(String simId)  { return "effective_cells:sim:" + simId + ":on"; }
     private static String simOffKey(String simId) { return "effective_cells:sim:" + simId + ":off"; }
 
-    private static String tileCacheKey(int z, int x, int y, String mode, String simId) {
-        return "tile_cache:" + z + ":" + x + ":" + y + ":" + mode + ":" + (simId != null ? simId : "null");
+    private static String tileCacheKey(int z, int x, int y, String mode, String networkTypesHash, String simId) {
+        return "tile_cache:" + z + ":" + x + ":" + y + ":" + mode + ":" + networkTypesHash + ":" + (simId != null ? simId : "null");
     }
 }
